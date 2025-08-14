@@ -21,13 +21,18 @@
     select, input { padding: 6px 8px; border-radius: 8px; border: 1px solid #ccc; }
     #status { font-size: 12px; opacity: 0.9; }
     #support { font-size: 12px; color: #b45309; }
-    #transcript { min-height: 220px; max-height: 55vh; overflow: auto; padding: 12px; background: rgba(127,127,127,.08); border-radius: 8px; white-space: pre-wrap; }
+    textarea#transcript {
+      width: 100%;
+      min-height: 220px; max-height: 55vh;
+      padding: 12px; background: rgba(127,127,127,.08);
+      border-radius: 8px; border: 1px solid #ccc; resize: vertical;
+      white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    }
     .footer { justify-content: space-between; font-size: 12px; opacity: 0.8; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
   </style>
 </head>
 <body>
-  <!-- ここに描画 -->
   <div id="main-box-layout"></div>
 
   <script>
@@ -54,7 +59,7 @@
         '      <span id="status"></span>' +
         '    </div>' +
         '  </div>' +
-        '  <div class="panel"><div id="transcript" class="mono" aria-live="polite"></div></div>' +
+        '  <div class="panel"><textarea id="transcript" class="mono" aria-live="polite" placeholder="ここに文字起こし結果が表示されます"></textarea></div>' +
         '  <div class="row footer">' +
         '    <div>GitHub Pages（HTTPS）で開いてください。初回のみマイク許可ダイアログが出ます。</div>' +
         '    <div>Web Speech API 非対応ブラウザではテキストは空のままです。</div>' +
@@ -80,23 +85,33 @@
       var interimText = '';
 
       var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      var SGL = window.SpeechGrammarList || window.webkitSpeechGrammarList;
       supportEl.textContent = SR ? 'SpeechRecognition: available' : 'SpeechRecognition: not available';
+
+      // （任意）業務語彙ヒント：必要ならここに語を追加（短いフレーズ推奨）
+      // 例: var boostWords = ['与信', '稟議', '見積書', '請求書', '仕訳'];
+      var boostWords = [];
+      function applyGrammars(rec) {
+        if (!SGL || !boostWords.length) return;
+        var list = new SGL();
+        // SRGS（超簡易）：語彙の列挙（*自由発話の補助*というより、固有名詞の認識安定化に期待）
+        var grammar = '#JSGF V1.0; grammar words; public <word> = ' + boostWords.map(w => w.replace(/;/g,'')).join(' | ') + ' ;';
+        list.addFromString(grammar, 0.4); // weightは控えめ
+        rec.grammars = list;
+      }
 
       // ====== マイク一覧（権限→列挙） ======
       (function initMics() {
         function fill() {
           navigator.mediaDevices.enumerateDevices().then(function (devices) {
-            var ins = [];
-            for (var i = 0; i < devices.length; i++) if (devices[i].kind === 'audioinput') ins.push(devices[i]);
-            var html = '';
-            for (var j = 0; j < ins.length; j++) {
-              html += '<option value="' + ins[j].deviceId + '">' + (ins[j].label || 'Microphone') + ' (' + (j + 1) + ')</option>';
-            }
+            var ins = devices.filter(function (d) { return d.kind === 'audioinput'; });
+            var html = ins.map(function (ins, j) {
+              return '<option value="' + ins.deviceId + '">' + (ins.label || 'Microphone') + ' (' + (j + 1) + ')</option>';
+            }).join('');
             micSel.innerHTML = html;
             if (!micSel.value && ins[0]) micSel.value = ins[0].deviceId;
           });
         }
-        // 許可プロンプト（label取得のため）。拒否でも列挙は続行。
         navigator.mediaDevices.getUserMedia({ audio: true })
           .then(function (s) { s.getTracks().forEach(function (t) { t.stop(); }); fill(); })
           .catch(function () { fill(); });
@@ -106,7 +121,7 @@
       function setStatus(msg) { statusEl.textContent = msg; }
       function renderText() {
         var joined = finalTexts.join(' ');
-        transcriptEl.textContent = joined + (interimText ? (' ' + interimText) : '');
+        transcriptEl.value = joined + (interimText ? (' ' + interimText) : '');
         transcriptEl.scrollTop = transcriptEl.scrollHeight;
       }
       function lockDuringRecording(on) {
@@ -117,10 +132,33 @@
         langSel.disabled = on;
       }
 
+      // ====== テキストエリア：フォーカスで全選択＆自動コピー ======
+      transcriptEl.addEventListener('focus', async function () {
+        var text = transcriptEl.value || '';
+        if (!text.trim()) return;
+        transcriptEl.select();
+        try {
+          await navigator.clipboard.writeText(text);
+          setStatus('全文をクリップボードにコピーしました。');
+        } catch (e) {
+          setStatus('全文選択のみ完了（クリップボードアクセス不可）。');
+        }
+      });
+
       // ====== 録音開始 ======
       startBtn.addEventListener('click', function () {
         var deviceId = micSel.value || undefined;
-        navigator.mediaDevices.getUserMedia({ audio: deviceId ? { deviceId: deviceId } : true })
+        var audioConstraints = deviceId ? { deviceId: deviceId } : {};
+        // 精度向上狙い：ブラウザ側の音声処理系を有効化
+        Object.assign(audioConstraints, {
+          noiseSuppression: true,
+          echoCancellation: true,
+          autoGainControl: true,
+          channelCount: { ideal: 1 },
+          sampleRate: 48000 // 理想値（強制できないがヒント）
+        });
+
+        navigator.mediaDevices.getUserMedia({ audio: audioConstraints })
           .then(function (s) {
             stream = s;
 
@@ -137,11 +175,14 @@
               recognition.lang = langSel.value;
               recognition.continuous = true;
               recognition.interimResults = true;
+              recognition.maxAlternatives = 1; // 迷いを減らす
+              applyGrammars(recognition);
+
               recognition.onresult = function (ev) {
                 interimText = '';
                 for (var i = ev.resultIndex; i < ev.results.length; i++) {
                   var r = ev.results[i];
-                  if (r.isFinal) { finalTexts.push(r[0].transcript.replace(/^\s+|\s+$/g, '')); }
+                  if (r.isFinal) { finalTexts.push(r[0].transcript.trim()); }
                   else { interimText += r[0].transcript; }
                 }
                 renderText();
@@ -173,7 +214,7 @@
           if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; }
           recorder = null;
 
-          if (interimText) { finalTexts.push(interimText.replace(/^\s+|\s+$/g, '')); interimText = ''; renderText(); }
+          if (interimText) { finalTexts.push(interimText.trim()); interimText = ''; renderText(); }
 
           // デバッグ用：音声Blobを拾いたいときに
           window.__lastAudioBlob = audioBlob;
@@ -185,7 +226,7 @@
 
       // ====== テキスト保存（.txt） ======
       saveBtn.addEventListener('click', function () {
-        var text = transcriptEl.textContent || '';
+        var text = transcriptEl.value || '';
         var blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
         var url = URL.createObjectURL(blob);
         var a = document.createElement('a');
