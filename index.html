@@ -38,6 +38,15 @@
   <div id="main-box-layout"></div>
 
   <script>
+    /**
+     * 音声入力を元にテキストを出力する。
+     * IM-BloomMakerが音声入力の部品を持っておらず、独自に実装するにしてもBMの制約に阻まれて、半日溶かしたので、怒りとともに静的なHTMLでそれを実現することにした。
+     * 生成したテキストをIM-LogicDesigner経由でOpenAIに送付する。利用するアクションはgpt-4o。
+     * 取得したテキストを音声生成(tts-1-hd)を利用して、音声化する。
+     * これをBMフロントに返却して、再生する流れをつくりたい。
+     * 本HTMLはGithubPagesに公開して、BMのインラインフレームに表示する。
+     * テキストの手動コピペが発生するのはカッコ悪いがこれはBMの機能の問題であって、私の問題ではない。
+     */
     (function () {
       // ====== UI ======
       const root = document.getElementById('main-box-layout');
@@ -45,7 +54,7 @@
 
       root.innerHTML =
         '<div class="wrap">' +
-        '  <h1>マイク → 文字起こし（Web Speech API 専用）</h1>' +
+        '  <h1>音声入力→テキスト</h1>' +
         '  <div class="panel">' +
         '    <div class="bar">' +
         '      <label class="pill">マイク <select id="mic"></select></label>' +
@@ -63,8 +72,8 @@
         '  </div>' +
         '  <div class="panel"><textarea id="transcript" class="mono" aria-live="polite" placeholder="ここに文字起こし結果が表示されます"></textarea></div>' +
         '  <div class="row footer">' +
-        '    <div>GitHub Pages（HTTPS）で開いてください。初回のみマイク許可ダイアログが出ます。</div>' +
-        '    <div>Web Speech API 非対応ブラウザではテキストは空のままです。</div>' +
+        '    <div>Web Speech API 非対応ブラウザでは動作しません。</div>' +
+        '    <div>Copyright(C) COMTURE CORPORATION. All rights reserved.</div>' +
         '  </div>' +
         '</div>';
 
