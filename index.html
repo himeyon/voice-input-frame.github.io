@@ -1,396 +1,372 @@
-<!doctype html>
-<html lang="ja">
-<head>
-  <meta charset="utf-8" />
-  <title>マイク → 文字起こし</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="color-scheme" content="light dark" />
-  <style>
-    :root { color-scheme: light dark; }
-    * { box-sizing: border-box; }
-    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Yu Gothic", Meiryo, sans-serif; }
-    .wrap { max-width: 960px; margin: 24px auto; padding: 16px; }
-    h1 { font-size: 20px; margin: 0 0 16px; }
-    .panel { border: 1px solid #ccc; border-radius: 12px; padding: 12px; margin-bottom: 12px; }
-    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-    .bar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
-    .pill { display: inline-flex; align-items: center; gap: 6px; padding: 6px 8px; border: 1px solid #ccc; border-radius: 999px; font-size: 12px; }
-    button { padding: 8px 12px; border-radius: 8px; border: 1px solid #999; cursor: pointer; background: #f5f5f5; }
-    button.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
-    button:disabled { opacity: 0.6; cursor: not-allowed; }
-    select, input { padding: 6px 8px; border-radius: 8px; border: 1px solid #ccc; }
-    #status { font-size: 12px; opacity: 0.9; }
-    #support { font-size: 12px; color: #b45309; }
-    textarea#transcript {
-      width: 100%;
-      min-height: 220px; max-height: 55vh;
-      padding: 12px; background: rgba(127,127,127,.08);
-      border-radius: 8px; border: 1px solid #ccc; resize: vertical;
-      white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+<script>
+/**
+ * UIはそのまま。内部で Vosk (CDN) を優先使用し、ダメなら従来の Web Speech に自動フォールバック。
+ * - CDN: Vosk-Browser（WASM）を unpkg から読込
+ * - 日本語モデル: 小さめモデルのzip（CORS環境が必要。通らない場合は自社CDNに置き換え）
+ * - マイク → 16kHz mono PCM → Voskに流して partial/final を反映
+ * - UIは一切追加/変更なし
+ */
+(function () {
+  // ====== UI生成（元のまま）======
+  const root = document.getElementById('main-box-layout');
+  if (!root) { document.body.innerHTML = '<p>#main-box-layout が見つかりません。</p>'; return; }
+
+  root.innerHTML =
+    '<div class="wrap">' +
+    '  <h1>音声入力→テキスト</h1>' +
+    '  <div class="panel">' +
+    '    <div class="bar">' +
+    '      <label class="pill">マイク <select id="mic"></select></label>' +
+    '      <label class="pill">言語 ' +
+    '        <select id="lang"><option value="ja-JP" selected>ja-JP</option><option value="en-US">en-US</option></select>' +
+    '      </label>' +
+    '      <span id="support"></span>' +
+    '    </div>' +
+    '    <div class="row">' +
+    '      <button id="start" class="primary">録音開始</button>' +
+    '      <button id="stop" disabled>停止</button>' +
+    '      <button id="saveText" disabled>テキスト保存</button>' +
+    '      <span id="status"></span>' +
+    '    </div>' +
+    '  </div>' +
+    '  <div class="panel"><textarea id="transcript" class="mono" aria-live="polite" placeholder="ここに文字起こし結果が表示されます"></textarea></div>' +
+    '  <div class="row footer">' +
+    '    <div>Web Speech API 非対応ブラウザでは動作しません。</div>' +
+    '    <div>Copyright(C) COMTURE CORPORATION. All rights reserved.</div>' +
+    '  </div>' +
+    '</div>';
+
+  // ====== 要素 ======
+  const micSel = document.getElementById('mic');
+  const langSel = document.getElementById('lang');
+  const startBtn = document.getElementById('start');
+  const stopBtn = document.getElementById('stop');
+  const saveBtn = document.getElementById('saveText');
+  const statusEl = document.getElementById('status');
+  const supportEl = document.getElementById('support');
+  const transcriptEl = document.getElementById('transcript');
+
+  // ====== 状態 ======
+  let stream = null;
+  let recorder = null;
+  let chunks = [];
+  let recognition = null;           // Web Speech 用
+  let finalTexts = [];
+  let interimText = '';
+
+  // ==== OSSエンジン（Vosk）関連 ====
+  let VOSK_READY = false;
+  let voskModel = null;
+  let voskRecognizer = null;
+  let ac = null, srcNode = null, workletNode = null; // AudioWorklet 経路
+  let downsamplerNode = null;                         // 48k→16k変換
+
+  // CDN先（必要に応じて自社CDNに置き換えOK）
+  const VOSK_JS_CDN = 'https://unpkg.com/vosk-browser/dist/vosk.js';
+  // 小さめ日本語モデル（CORSが通らない場合は自社CDNに配置してURL変更してください）
+  const VOSK_MODEL_ZIP = 'https://alphacephei.com/vosk/models/vosk-model-small-ja-0.22.zip';
+
+  // 事後補正（必要なら編集）
+  const normalizePairs = [
+    ['りんぎ','稟議'],
+    ['でんぴょう','伝票'],
+  ];
+  function applyNormalization(s) {
+    let out = s;
+    for (const [from, to] of normalizePairs) {
+      const re = new RegExp(from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
+      out = out.replace(re, to);
     }
-    .footer { justify-content: space-between; font-size: 12px; opacity: 0.8; }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
-    .grow { flex: 1 1 auto; min-width: 180px; }
-    .muted { opacity: .6; }
-  </style>
-</head>
-<body>
-  <div id="main-box-layout"></div>
+    return out;
+  }
 
-  <script>
-    (function () {
-      // ====== UI ======
-      const root = document.getElementById('main-box-layout');
-      if (!root) { document.body.innerHTML = '<p>#main-box-layout が見つかりません。</p>'; return; }
+  // ====== util ======
+  const setStatus = (msg) => { statusEl.textContent = msg; };
+  const renderText = () => {
+    const joined = finalTexts.join(' ');
+    transcriptEl.value = joined + (interimText ? (' ' + interimText) : '');
+    transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  };
+  const lockDuringRecording = (on) => {
+    startBtn.disabled = on;
+    stopBtn.disabled = !on;
+    saveBtn.disabled = false; // 表示中テキストはいつでも保存可
+    micSel.disabled = on;
+    langSel.disabled = on;
+  };
 
-      root.innerHTML =
-        '<div class="wrap">' +
-        '  <h1>音声入力→テキスト</h1>' +
-        '  <div class="panel">' +
-        '    <div class="bar">' +
-        '      <label class="pill">マイク <select id="mic"></select></label>' +
-        '      <label class="pill">言語 ' +
-        '        <select id="lang"><option value="ja-JP" selected>ja-JP</option><option value="en-US">en-US</option></select>' +
-        '      </label>' +
-        '      <span id="support"></span>' +
-        '    </div>' +
-        '    <div class="row">' +
-        '      <button id="start" class="primary">録音開始</button>' +
-        '      <button id="stop" disabled>停止</button>' +
-        '      <button id="saveText" disabled>テキスト保存</button>' +
-        '      <span id="status"></span>' +
-        '    </div>' +
-        '  </div>' +
-        '  <div class="panel"><textarea id="transcript" class="mono" aria-live="polite" placeholder="ここに文字起こし結果が表示されます"></textarea></div>' +
-        '  <div class="row footer">' +
-        '    <div>Web Speech API 非対応ブラウザでは動作しません。</div>' +
-        '    <div>Copyright(C) COMTURE CORPORATION. All rights reserved.</div>' +
-        '  </div>' +
-        '</div>';
-
-      // ====== 要素 ======
-      const micSel = document.getElementById('mic');
-      const langSel = document.getElementById('lang');
-      const startBtn = document.getElementById('start');
-      const stopBtn = document.getElementById('stop');
-      const saveBtn = document.getElementById('saveText');
-      const statusEl = document.getElementById('status');
-      const supportEl = document.getElementById('support');
-      const transcriptEl = document.getElementById('transcript');
-
-      // ====== 状態 ======
-      let stream = null;
-      let recorder = null;
-      let chunks = [];
-      let recognition = null;
-      let finalTexts = [];
-      let interimText = '';
-
-      // ==== 精度寄せ：語彙バイアス / 事後補正（UIは出さない） ====
-      const boostWords = ['稟議','与信','仕訳','伝票','勘定科目']; // 必要に応じて編集
-      const normalizePairs = [
-        ['りんぎ','稟議'],
-        ['でんぴょう','伝票'],
-      ];
-
-      // ==== 精度寄せ：無音検出(VAD)（UIは出さない） ====
-      const VAD_THR = 0.02;       // 0〜1 RMS
-      const VAD_ATTACK_MS = 120;  // 発話開始の最小継続
-      const VAD_RELEASE_MS = 600; // 無音終了の最小継続
-      let ctx = null, analyser = null, vadBuf = null, vadTimer = null;
-      let speaking = false, speakSince = 0, silentSince = 0;
-
-      // ==== SR & Grammar ====
-      const SR  = window.SpeechRecognition || window.webkitSpeechRecognition;
-      const SGL = window.SpeechGrammarList || window.webkitSpeechGrammarList;
-      supportEl.textContent = SR ? 'SpeechRecognition: available' : 'SpeechRecognition: not available';
-
-      function applyNormalization(s) {
-        let out = s;
-        for (const [from, to] of normalizePairs) {
-          const re = new RegExp(from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
-          out = out.replace(re, to);
+  // ====== マイク一覧（元のまま）======
+  (function initMics() {
+    const fill = (defaultDeviceId) => {
+      navigator.mediaDevices.enumerateDevices().then(devices => {
+        const ins = devices.filter(d => d.kind === 'audioinput');
+        micSel.innerHTML = ins.map((d, j) =>
+          `<option value="${d.deviceId}">${d.label || 'Microphone'} (${j+1})</option>`).join('');
+        if (defaultDeviceId && ins.some(d => d.deviceId === defaultDeviceId)) {
+          micSel.value = defaultDeviceId;
+        } else {
+          micSel.value = ins[0]?.deviceId || '';
         }
-        return out;
-      }
-      const applyGrammars = (rec) => {
-        if (!SGL || !boostWords.length) return;
-        const list = new SGL();
-        const grammar = '#JSGF V1.0; grammar words; public <word> = ' +
-          boostWords.map(w => String(w).replace(/[;=]/g,' ')).join(' | ') + ' ;';
-        list.addFromString(grammar, 0.9);
-        rec.grammars = list;
-      };
-      function rms(buf){ let s=0; for(let i=0;i<buf.length;i++) s+=buf[i]*buf[i]; return Math.sqrt(s/buf.length)||0; }
-
-      const setStatus = (msg) => { statusEl.textContent = msg; };
-      const renderText = () => {
-        const joined = finalTexts.join(' ');
-        transcriptEl.value = joined + (interimText ? (' ' + interimText) : '');
-        transcriptEl.scrollTop = transcriptEl.scrollHeight;
-      };
-      const lockDuringRecording = (on) => {
-        startBtn.disabled = on;
-        stopBtn.disabled = !on;
-        saveBtn.disabled = false;
-        micSel.disabled = on;
-        langSel.disabled = on;
-      };
-
-      transcriptEl.addEventListener('pointerdown', async () => {
-        const text = transcriptEl.value || '';
-        if (!text.trim()) return;
-        transcriptEl.select();
-        try { await navigator.clipboard.writeText(text); setStatus('全文をクリップボードにコピーしました。'); }
-        catch { setStatus('全文選択のみ完了（クリップボード不可）'); }
       });
+    };
+    navigator.mediaDevices.getUserMedia({ audio: true })
+      .then(s => {
+        const track = s.getAudioTracks()[0];
+        const settings = track && track.getSettings ? track.getSettings() : {};
+        const defaultId = settings.deviceId || '';
+        s.getTracks().forEach(t => t.stop());
+        fill(defaultId);
+      })
+      .catch(() => fill(''));
+  })();
 
-      // ====== マイク一覧 ======
-      (function initMics() {
-        const fill = (defaultDeviceId) => {
-          navigator.mediaDevices.enumerateDevices().then(devices => {
-            const ins = devices.filter(d => d.kind === 'audioinput');
-            micSel.innerHTML = ins.map((d, j) =>
-              `<option value="${d.deviceId}">${d.label || 'Microphone'} (${j+1})</option>`).join('');
-            if (defaultDeviceId && ins.some(d => d.deviceId === defaultDeviceId)) {
-              micSel.value = defaultDeviceId;
-            } else {
-              micSel.value = ins[0]?.deviceId || '';
-            }
-          });
-        };
-        navigator.mediaDevices.getUserMedia({ audio: true })
-          .then(s => {
-            const track = s.getAudioTracks()[0];
-            const settings = track && track.getSettings ? track.getSettings() : {};
-            const defaultId = settings.deviceId || '';
-            s.getTracks().forEach(t => t.stop());
-            fill(defaultId);
-          })
-          .catch(() => fill(''));
-      })();
+  // ====== Vosk の読み込みと初期化（CDN → モデル）======
+  async function ensureVosk() {
+    if (VOSK_READY) return true;
+    try {
+      setStatus('Vosk 読み込み中…');
+      // CDNからライブラリを読み込み
+      await new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = VOSK_JS_CDN;
+        s.async = true;
+        s.onload = resolve;
+        s.onerror = reject;
+        document.head.appendChild(s);
+      });
+      if (!window.Vosk) throw new Error('Vosk not loaded');
 
-      // ====== SR（発話単位：stop→onend→再start） ======
-      let shouldRun = false, busy = false, token = 0;
-      const RESTART_MIN_MS = 600, RESTART_BACKOFF_MS = 800;
+      // モデル読み込み（初回のみ時間かかる）
+      // メモリ節約のため default: 1 認識器で十分
+      const { Vosk } = window;
+      Vosk.setLogLevel && Vosk.setLogLevel(-1);
+      voskModel = await Vosk.createModel(VOSK_MODEL_ZIP);
+      // 16kHz 前提
+      voskRecognizer = new voskModel.Recognizer({ sampleRate: 16000 });
+      VOSK_READY = true;
+      supportEl.textContent = 'Vosk: ready (OSS)';   // UIのテキストはこの1行だけ変更
+      setStatus('Vosk 準備完了');
+      return true;
+    } catch (e) {
+      console.warn('[vosk] init failed -> fallback Web Speech', e);
+      supportEl.textContent = 'SpeechRecognition: available (fallback)';
+      setStatus('Vosk使えないためWeb Speechに切替');
+      return false;
+    }
+  }
 
-      function startRecognitionOneShot() {
-        if (!SR || !shouldRun || busy) return;
-        busy = true;
-        token++;
-        const my = token;
-
-        recognition = new SR();
-        recognition.lang = langSel.value;
-        recognition.continuous = false;      // 発話単位で区切る
-        recognition.interimResults = true;
-        recognition.maxAlternatives = 1;
-        applyGrammars(recognition);
-
-        recognition.onstart = () => { if (my!==token) return; setStatus('認識中…'); };
-
-        recognition.onresult = (ev) => {
-          if (my!==token) return;
-          interimText = '';
-          for (let i = ev.resultIndex; i < ev.results.length; i++) {
-            const r = ev.results[i];
-            if (r.isFinal) {
-              let txt = applyNormalization(r[0].transcript.trim());
-              if (!/[。．.!?！？]$/.test(txt) && txt.length >= 4) txt += '。';
-              finalTexts.push(txt);
-            } else {
-              interimText += r[0].transcript;
-            }
-          }
-          renderText();
-        };
-
-        recognition.onerror = (e) => {
-          const err = (e && (e.error || e.name || e.message)) || 'unknown';
-          if (err !== 'aborted') console.warn('[sr:error]', err);
-          // 再起動は onend 側に任せる
-        };
-
-        recognition.onend = () => {
-          if (my!==token) return;
-          busy = false; interimText = ''; renderText();
-          if (shouldRun) setTimeout(() => startRecognitionOneShot(), Math.max(RESTART_MIN_MS, RESTART_BACKOFF_MS));
-          else setStatus('停止');
-        };
-
-        try { recognition.start(); } catch (err) {
-          busy = false;
-          console.warn('[sr:start]', err);
-          setTimeout(() => { if (shouldRun) startRecognitionOneShot(); }, RESTART_BACKOFF_MS);
+  // ====== 48kHz → 16kHz 変換（AudioWorklet）======
+  const WORKLET_CODE = `
+    class DownsamplerProcessor extends AudioWorkletProcessor {
+      constructor() { super(); this._buf = []; this._acc = 0; }
+      // input: 48k mono
+      process(inputs, outputs, parameters) {
+        const input = inputs[0];
+        if (!input || input.length === 0) return true;
+        const ch = input[0]; // mono
+        if (!ch) return true;
+        // 48k -> 16k: 1/3 サンプルを均等ダウンサンプル（簡易）
+        const out = new Int16Array(Math.floor(ch.length/3));
+        let oi = 0;
+        for (let i=0;i+2<ch.length;i+=3) {
+          // 単純に 3 点中の中央を拾う（音質と負荷の妥協）
+          let v = ch[i+1];
+          // clip & int16
+          v = Math.max(-1, Math.min(1, v));
+          out[oi++] = v < 0 ? v * 32768 : v * 32767;
         }
+        this.port.postMessage(out);
+        return true;
       }
+    }
+    registerProcessor('downsampler', DownsamplerProcessor);
+  `;
 
-      // ====== VAD（無音検出で SR を制御） ======
-      function startVADFromStream(stream) {
-        const AC = window.AudioContext || window.webkitAudioContext;
-        ctx = new AC();
-        const src = ctx.createMediaStreamSource(stream);
-        analyser = ctx.createAnalyser();
-        analyser.fftSize = 2048;
-        vadBuf = new Float32Array(analyser.fftSize);
-        src.connect(analyser);
-
-        // AudioContextがsuspendされたら自己回復
-        try {
-          ctx.onstatechange = function () {
-            if (ctx.state === 'suspended') setTimeout(() => { try { ctx.resume(); } catch(_){} }, 300);
-          };
-        } catch(_) {}
-
-        if (vadTimer) clearInterval(vadTimer);
-        vadTimer = setInterval(() => {
-          analyser.getFloatTimeDomainData(vadBuf);
-          const level = rms(vadBuf);
-          const now = Date.now();
-
-          if (level >= VAD_THR) {
-            if (!speaking) {
-              if (!speakSince) speakSince = now;
-              if (now - speakSince >= VAD_ATTACK_MS) {
-                speaking = true; silentSince = 0;
-                if (shouldRun && !busy) startRecognitionOneShot();
-              }
-            } else {
-              silentSince = 0;
-            }
-          } else {
-            speakSince = 0;
-            if (speaking) {
-              if (!silentSince) silentSince = now;
-              if (now - silentSince >= VAD_RELEASE_MS) {
-                speaking = false;
-                try { if (recognition && busy) recognition.stop(); } catch {}
-              }
-            }
-          }
-        }, 50);
-      }
-
-      // ====== タブ復帰で復活 ======
-      document.addEventListener('visibilitychange', function () {
-        if (document.hidden) return;
-        try { if (ctx && ctx.state === 'suspended') ctx.resume(); } catch(_){}
-        if (shouldRun && !busy) setTimeout(() => { if (shouldRun && !busy) startRecognitionOneShot(); }, 200);
-      });
-
-      // ====== 録音開始 ======
-      startBtn.addEventListener('click', () => {
-        const deviceId = micSel.value || undefined;
-        const audioConstraints = deviceId ? { deviceId } : {};
-        Object.assign(audioConstraints, {
-          noiseSuppression: true,
-          echoCancellation: true,
-          autoGainControl: true,
-          channelCount: { ideal: 1 },
-          sampleRate: 48000
-        });
-
-        navigator.mediaDevices.getUserMedia({ audio: audioConstraints })
-          .then((s) => {
-            stream = s;
-
-            // MediaRecorder（録音自体はそのまま）
-            const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
-            recorder = new MediaRecorder(stream, { mimeType: mime });
-            chunks = [];
-            recorder.addEventListener('dataavailable', (e) => { if (e.data && e.data.size) chunks.push(e.data); });
-            recorder.start();
-
-            // VAD起動（SRは発話で自動start）
-            startVADFromStream(stream);
-
-            // マイク断・デバイス変化に追随
-            function restartStream() {
-              if (!shouldRun) return;
-              const deviceId = micSel.value || undefined;
-              const audioConstraints = deviceId ? { deviceId } : {};
-              Object.assign(audioConstraints, {
-                noiseSuppression: true, echoCancellation: true, autoGainControl: true,
-                channelCount: { ideal: 1 }, sampleRate: 48000
-              });
-              navigator.mediaDevices.getUserMedia({ audio: audioConstraints }).then(ns => {
-                try { stream && stream.getTracks().forEach(t => t.stop()); } catch(_){}
-                stream = ns;
-                try { if (ctx && ctx.close) ctx.close(); } catch(_){}
-                ctx = null; analyser = null; vadBuf = null;
-                startVADFromStream(stream);
-                if (shouldRun && !busy) startRecognitionOneShot();
-              }).catch(e => console.warn('[mic:restart]', e));
-            }
-            try {
-              stream.getTracks().forEach(t => t.addEventListener('ended', restartStream));
-              if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
-                navigator.mediaDevices.addEventListener('devicechange', restartStream);
-              }
-            } catch(_) {}
-
-            // SR 状態初期化
-            finalTexts = [];
-            interimText = '';
-            shouldRun = true; busy = false; token = 0;
-            setStatus('待機中（声で自動開始）');
-            lockDuringRecording(true);
-          })
-          .catch((err) => {
-            console.error(err);
-            alert('マイクの使用を許可してください。');
-          });
-      });
-
-      // ====== 録音停止 ======
-      stopBtn.addEventListener('click', () => {
-        shouldRun = false;
-
-        if (recognition) { try { recognition.stop(); } catch (e) {} recognition = null; }
-        busy = false;
-
-        if (vadTimer) { clearInterval(vadTimer); vadTimer = null; }
-        try { if (ctx && ctx.close) ctx.close(); } catch {}
-        ctx = null; analyser = null; vadBuf = null;
-        speaking = false; speakSince = 0; silentSince = 0;
-
-        new Promise((resolve) => {
-          if (!recorder) { resolve(new Blob([], { type: 'audio/webm' })); return; }
-          recorder.addEventListener('stop', () => {
-            resolve(new Blob(chunks, { type: (recorder.mimeType || 'audio/webm') }));
-          }, { once: true });
-          if (recorder.state !== 'inactive') recorder.stop();
-        }).then((audioBlob) => {
-          if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
-          recorder = null;
-
-          if (interimText) {
-            let txt = applyNormalization(interimText.trim());
-            if (!/[。．.!?！？]$/.test(txt) && txt.length >= 4) txt += '。';
-            finalTexts.push(txt);
+  async function setupAudioGraph(stream) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    ac = new AC({ sampleRate: 48000 });
+    srcNode = ac.createMediaStreamSource(stream);
+    // Worklet登録
+    const blob = new Blob([WORKLET_CODE], { type: 'application/javascript' });
+    const url = URL.createObjectURL(blob);
+    await ac.audioWorklet.addModule(url);
+    URL.revokeObjectURL(url);
+    workletNode = new AudioWorkletNode(ac, 'downsampler');
+    srcNode.connect(workletNode);
+    // Voskへ送る
+    workletNode.port.onmessage = (e) => {
+      if (!VOSK_READY || !voskRecognizer) return;
+      const pcm16 = e.data; // Int16Array
+      try {
+        const ok = voskRecognizer.acceptWaveform(pcm16);
+        if (ok) {
+          const res = voskRecognizer.result(); // {text:"..."}
+          const txt = (res && res.text) ? res.text.trim() : '';
+          if (txt) {
+            const fixed = applyNormalization(txt);
+            finalTexts.push(fixed.endsWith('。') ? fixed : (fixed + '。'));
             interimText = '';
             renderText();
           }
+        } else {
+          const pr = voskRecognizer.partialResult(); // {partial:"..."}
+          interimText = (pr && pr.partial) ? pr.partial : '';
+          renderText();
+        }
+      } catch (err) {
+        console.warn('[vosk] accept error', err);
+      }
+    };
+  }
 
-          setStatus('停止（音声 ' + Math.round(audioBlob.size / 1024) + ' KB）');
-          lockDuringRecording(false);
-        });
-      });
+  // ====== Web Speech（既存）======
+  const SR  = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const SGL = window.SpeechGrammarList || window.webkitSpeechGrammarList;
+  const boostWords = []; // 必要なら手動で
+  const applyGrammars = (rec) => {
+    if (!SGL || !boostWords.length) return;
+    const list = new SGL();
+    const grammar = '#JSGF V1.0; grammar words; public <word> = ' + boostWords.map(w => w.replace(/;/g,'')).join(' | ') + ' ;';
+    list.addFromString(grammar, 0.4);
+    rec.grammars = list;
+  };
 
-      // ====== テキスト保存 ======
-      saveBtn.addEventListener('click', () => {
-        const text = transcriptEl.value || '';
-        const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'transcript-' + new Date().toISOString().replace(/[:.]/g, '-') + '.txt';
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
+  // ====== クリックで全文コピー（元のまま）======
+  transcriptEl.addEventListener('pointerdown', async () => {
+    const text = transcriptEl.value || '';
+    if (!text.trim()) return;
+    transcriptEl.select();
+    try {
+      await navigator.clipboard.writeText(text);
+      setStatus('全文をクリップボードにコピーしました。');
+    } catch { setStatus('全文選択のみ完了（クリップボード不可）'); }
+  });
+
+  // ====== 録音開始（UIはそのまま）======
+  startBtn.addEventListener('click', async () => {
+    const deviceId = micSel.value || undefined;
+    const audioConstraints = deviceId ? { deviceId } : {};
+    Object.assign(audioConstraints, {
+      noiseSuppression: true,
+      echoCancellation: true,
+      autoGainControl: true,
+      channelCount: { ideal: 1 },
+      sampleRate: 48000
+    });
+
+    navigator.mediaDevices.getUserMedia({ audio: audioConstraints })
+      .then(async (s) => {
+        stream = s;
+
+        // 収音 → 保存（あなたの元コードそのまま）
+        const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
+        recorder = new MediaRecorder(stream, { mimeType: mime });
+        chunks = [];
+        recorder.addEventListener('dataavailable', (e) => { if (e.data && e.data.size) chunks.push(e.data); });
+        recorder.start();
+
+        finalTexts = [];
+        interimText = '';
+
+        // まずVoskを試す → 使えなければWeb Speechにフォールバック
+        const useVosk = await ensureVosk();
+        if (useVosk) {
+          // AudioWorkletで16kに落としてVoskに流す
+          await setupAudioGraph(stream);
+          setStatus('録音中（Vosk, ブラウザ内認識）…');
+          lockDuringRecording(true);
+          return;
+        }
+
+        // Fallback: Web Speech（元の処理）
+        if (SR) {
+          recognition = new SR();
+          recognition.lang = langSel.value;
+          recognition.continuous = true;
+          recognition.interimResults = true;
+          recognition.maxAlternatives = 1;
+          applyGrammars(recognition);
+
+          recognition.onresult = (ev) => {
+            interimText = '';
+            for (let i = ev.resultIndex; i < ev.results.length; i++) {
+              const r = ev.results[i];
+              if (r.isFinal) finalTexts.push(applyNormalization(r[0].transcript.trim()));
+              else interimText += r[0].transcript;
+            }
+            renderText();
+          };
+          recognition.onerror = (e) => {
+            const err = (e && (e.error||e.name||e.message)) || 'unknown';
+            if (err !== 'aborted') console.warn('[sr:error]', err);
+          };
+          recognition.onend = () => {
+            // 勝手に止まったら自動再開
+            try { recognition.start(); } catch(_) {}
+          };
+          try { recognition.start(); } catch (e) {}
+          supportEl.textContent = 'SpeechRecognition: fallback';
+        }
+
+        lockDuringRecording(true);
+        setStatus('録音中…');
+      })
+      .catch((err) => {
+        console.error(err);
+        alert('マイクの使用を許可してください。');
       });
-    })();
-  </script>
-</body>
-</html>
+  });
+
+  // ====== 録音停止（UIはそのまま）======
+  stopBtn.addEventListener('click', () => {
+    // Vosk経路の後片付け
+    try { if (workletNode) workletNode.port.onmessage = null; } catch(_){}
+    try { if (srcNode) srcNode.disconnect(); } catch(_){}
+    try { if (workletNode) workletNode.disconnect(); } catch(_){}
+    try { if (downsamplerNode) downsamplerNode.disconnect(); } catch(_){}
+    try { if (ac && ac.state !== 'closed' && ac.close) ac.close(); } catch(_){}
+    workletNode = null; downsamplerNode = null; srcNode = null; ac = null;
+
+    // Web Speech経路の後片付け
+    if (recognition) { try { recognition.onend = null; recognition.stop(); } catch (e) {} recognition = null; }
+
+    // 録音停止（元コード）
+    new Promise((resolve) => {
+      if (!recorder) { resolve(new Blob([], { type: 'audio/webm' })); return; }
+      recorder.addEventListener('stop', () => {
+        resolve(new Blob(chunks, { type: (recorder.mimeType || 'audio/webm') }));
+      }, { once: true });
+      if (recorder.state !== 'inactive') recorder.stop();
+    }).then((audioBlob) => {
+      if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+      recorder = null;
+
+      if (interimText) {
+        let txt = applyNormalization(interimText.trim());
+        if (!/[。．.!?！？]$/.test(txt) && txt.length >= 4) txt += '。';
+        finalTexts.push(txt);
+        interimText = '';
+        renderText();
+      }
+
+      setStatus('停止（音声 ' + Math.round(audioBlob.size / 1024) + ' KB）');
+      lockDuringRecording(false);
+    });
+  });
+
+  // ====== テキスト保存（元のまま）======
+  saveBtn.addEventListener('click', () => {
+    const text = transcriptEl.value || '';
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'transcript-' + new Date().toISOString().replace(/[:.]/g, '-') + '.txt';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  });
+
+})();
+</script>
