@@ -38,16 +38,6 @@
   <div id="main-box-layout"></div>
 
   <script>
-    /**
-     * 音声入力を元にテキストを出力する。
-     * IM-BloomMakerが音声入力の部品を持っておらず、独自に実装するにしてもBMの制約に阻まれて、半日溶かしたので、怒りとともに静的なHTMLでそれを実現することにした。
-     * 生成したテキストをIM-LogicDesigner経由でOpenAIに送付する。利用するアクションはgpt-4o。
-     * 取得したテキストを音声生成(tts-1-hd)を利用して、音声化する。
-     * これをBMフロントに返却して、再生する流れをつくりたい。
-     * ☓ 本HTMLはGithubPagesに公開して、BMのインラインフレームに表示する。
-     * ◯ 本HTMLはGithubPagesに公開して、BMでポップアップ表示する。(※インラインフレームはBMのコンポーネントがallow属性の付与手段を提供していないため、諦めた。
-     * テキストの手動コピペが発生するのはカッコ悪いがこれはBMの機能の問題であって、私の問題ではない。
-     */
     (function () {
       // ====== UI ======
       const root = document.getElementById('main-box-layout');
@@ -96,52 +86,24 @@
       let finalTexts = [];
       let interimText = '';
 
+      // ★ 精度強化：語彙バイアス＆事後補正（必要に応じて編集）
+      const boostWords = ['稟議','与信','仕訳','伝票','勘定科目']; // 追加したい単語
+      const normalizePairs = [ // ['誤','正'] 例
+        ['りんぎ', '稟議'],
+        ['でんぴょう', '伝票'],
+      ];
+
+      // ★ 精度強化：無音検出(VAD)のしきい値（UIは増やさない）
+      const VAD_THR = 0.02;       // RMS 0〜1
+      const VAD_ATTACK_MS = 120;  // この時間以上の有声で開始
+      const VAD_RELEASE_MS = 600; // この時間以上の無音で終了
+      let ctx = null, analyser = null, vadBuf = null, vadTimer = null;
+      let speaking = false, speakSince = 0, silentSince = 0;
+
+      // ====== API判定 ======
       const SR  = window.SpeechRecognition || window.webkitSpeechRecognition;
       const SGL = window.SpeechGrammarList || window.webkitSpeechGrammarList;
       supportEl.textContent = SR ? 'SpeechRecognition: available' : 'SpeechRecognition: not available';
-
-      // Web Speech 用：語彙ヒント（任意）
-      const boostWords = []; // 例: ['稟議','伝票','勘定科目','仕訳','与信']
-      const applyGrammars = (rec) => {
-        if (!SGL || !boostWords.length) return;
-        const list = new SGL();
-        const grammar = '#JSGF V1.0; grammar words; public <word> = ' + boostWords.map(w => w.replace(/;/g,'')).join(' | ') + ' ;';
-        list.addFromString(grammar, 0.4);
-        rec.grammars = list;
-      };
-
-      // ====== 既定マイクを自動選択して一覧に反映 ======
-      (function initMics() {
-        const fill = (defaultDeviceId) => {
-          navigator.mediaDevices.enumerateDevices().then(devices => {
-            const ins = devices.filter(d => d.kind === 'audioinput');
-            micSel.innerHTML = ins.map((d, j) =>
-              `<option value="${d.deviceId}">${d.label || 'Microphone'} (${j+1})</option>`).join('');
-
-            // 1) 権限あり：getUserMedia結果の deviceId を優先（ブラウザ既定）
-            // 2) それが見つからない／権限なし：先頭
-            if (defaultDeviceId && ins.some(d => d.deviceId === defaultDeviceId)) {
-              micSel.value = defaultDeviceId;
-            } else {
-              micSel.value = ins[0]?.deviceId || '';
-            }
-          });
-        };
-
-        // ラベル取得＆既定デバイスID取得のため一度だけ権限プロンプト
-        navigator.mediaDevices.getUserMedia({ audio: true })
-          .then(s => {
-            const track = s.getAudioTracks()[0];
-            const settings = track && track.getSettings ? track.getSettings() : {};
-            const defaultId = settings.deviceId || ''; // 既定の入力デバイスID
-            s.getTracks().forEach(t => t.stop());
-            fill(defaultId);
-          })
-          .catch(() => {
-            // 拒否された場合でも一覧は出す（既定は先頭）
-            fill('');
-          });
-      })();
 
       // ====== ユーティリティ ======
       const setStatus = (msg) => { statusEl.textContent = msg; };
@@ -157,6 +119,23 @@
         micSel.disabled = on;
         langSel.disabled = on;
       };
+      function applyNormalization(s) {
+        let out = s;
+        for (const [from, to] of normalizePairs) {
+          const re = new RegExp(from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
+          out = out.replace(re, to);
+        }
+        return out;
+      }
+      const applyGrammars = (rec) => {
+        if (!SGL || !boostWords.length) return;
+        const list = new SGL();
+        const grammar = '#JSGF V1.0; grammar words; public <word> = ' +
+          boostWords.map(w => String(w).replace(/[;=]/g,' ')).join(' | ') + ' ;';
+        list.addFromString(grammar, 0.9); // ★重みを強めに
+        rec.grammars = list;
+      };
+      function rms(buf) { let s=0; for (let i=0;i<buf.length;i++) s+=buf[i]*buf[i]; return Math.sqrt(s/buf.length)||0; }
 
       // クリックで全文コピー（ユーザー操作に紐づけ）
       transcriptEl.addEventListener('pointerdown', async () => {
@@ -168,6 +147,129 @@
           setStatus('全文をクリップボードにコピーしました。');
         } catch { setStatus('全文選択のみ完了（クリップボード不可）'); }
       });
+
+      // ====== 既定マイクを自動選択して一覧に反映 ======
+      (function initMics() {
+        const fill = (defaultDeviceId) => {
+          navigator.mediaDevices.enumerateDevices().then(devices => {
+            const ins = devices.filter(d => d.kind === 'audioinput');
+            micSel.innerHTML = ins.map((d, j) =>
+              `<option value="${d.deviceId}">${d.label || 'Microphone'} (${j+1})</option>`).join('');
+            if (defaultDeviceId && ins.some(d => d.deviceId === defaultDeviceId)) {
+              micSel.value = defaultDeviceId;
+            } else {
+              micSel.value = ins[0]?.deviceId || '';
+            }
+          });
+        };
+        navigator.mediaDevices.getUserMedia({ audio: true })
+          .then(s => {
+            const track = s.getAudioTracks()[0];
+            const settings = track && track.getSettings ? track.getSettings() : {};
+            const defaultId = settings.deviceId || '';
+            s.getTracks().forEach(t => t.stop());
+            fill(defaultId);
+          })
+          .catch(() => fill(''));
+      })();
+
+      // ====== SR（発話単位：連続で自動再開） ======
+      let shouldRun = false, busy = false, token = 0, lastEnd = 0;
+      const RESTART_MIN_MS = 600, RESTART_BACKOFF_MS = 800;
+
+      function startRecognitionOneShot() {
+        if (!SR || !shouldRun || busy) return;
+        busy = true;
+        token++;
+        const my = token;
+
+        recognition = new SR();
+        recognition.lang = langSel.value;
+        recognition.continuous = false;      // ★発話単位で区切る
+        recognition.interimResults = true;
+        recognition.maxAlternatives = 1;
+        applyGrammars(recognition);
+
+        recognition.onstart = () => { if (my!==token) return; setStatus('認識中…'); };
+        recognition.onresult = (ev) => {
+          if (my!==token) return;
+          interimText = '';
+          for (let i = ev.resultIndex; i < ev.results.length; i++) {
+            const r = ev.results[i];
+            if (r.isFinal) {
+              let txt = applyNormalization(r[0].transcript.trim());
+              if (!/[。．.!?！？]$/.test(txt) && txt.length >= 4) txt += '。'; // ★終端補助
+              finalTexts.push(txt);
+            } else {
+              interimText += r[0].transcript;
+            }
+          }
+          renderText();
+        };
+        recognition.onerror = (e) => {
+          const err = (e && (e.error || e.name || e.message)) || 'unknown';
+          // ★aborted は無視（再起動は onend に任せる）
+          if (err !== 'aborted') console.warn('[sr:error]', err);
+        };
+        recognition.onend = () => {
+          if (my!==token) return;
+          busy = false; interimText=''; renderText();
+          lastEnd = Date.now();
+          if (shouldRun) {
+            const delay = Math.max(RESTART_MIN_MS, RESTART_BACKOFF_MS);
+            setTimeout(() => startRecognitionOneShot(), delay);
+          } else {
+            setStatus('停止');
+          }
+        };
+
+        try { recognition.start(); } catch (err) {
+          busy = false;
+          console.warn('[sr:start]', err);
+          setTimeout(() => shouldRun && startRecognitionOneShot(), RESTART_BACKOFF_MS);
+        }
+      }
+
+      // ====== VAD（無音で SR を止めて確定させる） ======
+      function startVADFromStream(stream) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        ctx = new AC();
+        const src = ctx.createMediaStreamSource(stream);
+        analyser = ctx.createAnalyser();
+        analyser.fftSize = 2048;
+        vadBuf = new Float32Array(analyser.fftSize);
+        src.connect(analyser);
+
+        if (vadTimer) clearInterval(vadTimer);
+        vadTimer = setInterval(() => {
+          analyser.getFloatTimeDomainData(vadBuf);
+          const level = rms(vadBuf);
+          const now = Date.now();
+
+          if (level >= VAD_THR) {
+            if (!speaking) {
+              if (!speakSince) speakSince = now;
+              if (now - speakSince >= VAD_ATTACK_MS) {
+                speaking = true; silentSince = 0;
+                // 発話開始：SRが止まっていれば起動
+                if (shouldRun && !busy) startRecognitionOneShot();
+              }
+            } else {
+              silentSince = 0;
+            }
+          } else {
+            speakSince = 0;
+            if (speaking) {
+              if (!silentSince) silentSince = now;
+              if (now - silentSince >= VAD_RELEASE_MS) {
+                speaking = false;
+                // 発話終了：走っている SR を止めて確定を促す
+                try { if (recognition && busy) recognition.stop(); } catch {}
+              }
+            }
+          }
+        }, 50);
+      }
 
       // ====== 録音開始 ======
       startBtn.addEventListener('click', () => {
@@ -185,38 +287,22 @@
           .then((s) => {
             stream = s;
 
+            // MediaRecorder（そのまま）
             const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
             recorder = new MediaRecorder(stream, { mimeType: mime });
             chunks = [];
             recorder.addEventListener('dataavailable', (e) => { if (e.data && e.data.size) chunks.push(e.data); });
             recorder.start();
 
+            // ★精度：VAD開始（発話でSR起動・無音で確定）
+            startVADFromStream(stream);
+
+            // SRの状態初期化
             finalTexts = [];
             interimText = '';
-
-            if (SR) {
-              recognition = new SR();
-              recognition.lang = langSel.value;
-              recognition.continuous = true;
-              recognition.interimResults = true;
-              recognition.maxAlternatives = 1;
-              applyGrammars(recognition);
-
-              recognition.onresult = (ev) => {
-                interimText = '';
-                for (let i = ev.resultIndex; i < ev.results.length; i++) {
-                  const r = ev.results[i];
-                  if (r.isFinal) finalTexts.push(r[0].transcript.trim());
-                  else interimText += r[0].transcript;
-                }
-                renderText();
-              };
-              recognition.onerror = () => {};
-              try { recognition.start(); } catch (e) {}
-            }
-
+            shouldRun = true; busy = false; token = 0; lastEnd = 0;
+            setStatus('待機中（声で自動開始）');
             lockDuringRecording(true);
-            setStatus('録音中…');
           })
           .catch((err) => {
             console.error(err);
@@ -226,7 +312,15 @@
 
       // ====== 録音停止 ======
       stopBtn.addEventListener('click', () => {
+        shouldRun = false;
+
         if (recognition) { try { recognition.stop(); } catch (e) {} recognition = null; }
+        busy = false;
+
+        if (vadTimer) { clearInterval(vadTimer); vadTimer = null; }
+        try { if (ctx && ctx.close) ctx.close(); } catch {}
+        ctx = null; analyser = null; vadBuf = null;
+        speaking = false; speakSince = 0; silentSince = 0;
 
         new Promise((resolve) => {
           if (!recorder) { resolve(new Blob([], { type: 'audio/webm' })); return; }
@@ -238,11 +332,15 @@
           if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
           recorder = null;
 
-          if (interimText) { finalTexts.push(interimText.trim()); interimText = ''; renderText(); }
+          if (interimText) {
+            let txt = applyNormalization(interimText.trim());
+            if (!/[。．.!?！？]$/.test(txt) && txt.length >= 4) txt += '。';
+            finalTexts.push(txt);
+            interimText = '';
+            renderText();
+          }
 
-          // デバッグ用：音声Blobサイズ表示
           setStatus('停止（音声 ' + Math.round(audioBlob.size / 1024) + ' KB）');
-
           lockDuringRecording(false);
         });
       });
