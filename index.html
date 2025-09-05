@@ -38,11 +38,12 @@
   <script>
   (function () {
     // ====== 固定設定（GitHub Pages: https://<ユーザー>.github.io/voice-input-frame/）======
-    const REPO_BASE = location.origin + '/voice-input-frame/';   // 末尾スラッシュ必須（リポジトリ名に合わせる）
+    // このHTMLのディレクトリを基準にする（常に末尾スラッシュ）
+    const REPO_BASE = new URL('./', location.href).href;
     const VOSK_ENABLE = true;
     const VOSK_INIT_TIMEOUT_MS = 120000;                         // 50MBモデル想定
     const VOSK_BASE  = 'https://cdn.jsdelivr.net/npm/vosk-browser@0.0.8/dist/'; // 0.0.8は vosk.js のみ
-    const VOSK_MODEL = REPO_BASE + 'static/models/vosk-model-small-ja-0.22/';   // 解凍済みディレクトリ固定
+    const VOSK_MODEL = new URL('static/models/vosk-model-small-ja-0.22/', REPO_BASE).href; // 解凍済みディレクトリ
 
 
     // ====== UI ======
@@ -85,7 +86,7 @@
     const transcriptEl = document.getElementById('transcript');
 
     // 固定パス1本読み（static/models 配下の存在確認）
-    const MODEL_PROBE_URL = REPO_BASE + 'static/models/vosk-model-small-ja-0.22/conf/model.conf';
+    const MODEL_PROBE_URL = new URL('static/models/vosk-model-small-ja-0.22/conf/model.conf', REPO_BASE).href;
     (async () => {
       try {
         const r = await fetch(MODEL_PROBE_URL, { cache: 'no-store' });
