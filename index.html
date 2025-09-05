@@ -53,7 +53,7 @@
     const VOSK_BASE  = BASE_PATH + 'static/vosk/';                 // ← vosk.js / vosk.wasm / worker.js 等
     const VOSK_MODEL = BASE_PATH + 'static/models/vosk-model-small-ja-0.22.zip';
     const VOSK_ENABLE = true;       // 試す時 true、戻す時 false
-    const VOSK_INIT_TIMEOUT_MS = 4000;
+    const VOSK_INIT_TIMEOUT_MS = 15000;
 
 
     // ====== UI ======
@@ -220,21 +220,48 @@
       }
     }
 
+    // ページアイドル時にVoskを先読み（初回体験の改善）
+    if ('requestIdleCallback' in window) {
+      window.requestIdleCallback(() => { ensureVosk().catch(()=>{}); }, { timeout: 500 });
+    } else {
+      window.setTimeout(() => { ensureVosk().catch(()=>{}); }, 500);
+    }
+
     // ====== 48kHz→16kHz ダウンサンプル(AudioWorklet) ======
     const WORKLET_CODE = `
       class DownsamplerProcessor extends AudioWorkletProcessor {
+        constructor() {
+          super();
+          this.ratio = 3;     // inRate / 16000
+          this.pos = 0;       // 入力バッファ位置の小数累積
+          this.prev = 0;      // 前バッファの末尾サンプル
+          this.port.onmessage = (e) => {
+            if (e.data && e.data.type === 'cfg' && e.data.ratio) this.ratio = e.data.ratio;
+          };
+        }
         process(inputs) {
           const input = inputs[0];
           if (!input || input.length === 0) return true;
           const ch = input[0];
-          if (!ch) return true;
-          const out = new Int16Array(Math.floor(ch.length/3));
-          let oi=0;
-          for (let i=0;i+2<ch.length;i+=3) {
-            let v = ch[i+1];
-            v = Math.max(-1, Math.min(1, v));
-            out[oi++] = v<0 ? v*32768 : v*32767;
+          if (!ch || ch.length === 0) return true;
+          const inLen = ch.length;
+          const ratio = this.ratio;
+          const outLen = Math.floor((inLen + this.pos) / ratio);
+          if (outLen <= 0) { this.pos += inLen; return true; }
+          const out = new Int16Array(outLen);
+          let pos = this.pos;
+          for (let o = 0; o < outLen; o++) {
+            const idx = Math.floor(pos);
+            const frac = pos - idx;
+            const s0 = (idx === 0) ? this.prev : ch[idx - 1];
+            const s1 = ch[idx];
+            const s  = s0 + (s1 - s0) * frac;  // 線形補間
+            const v  = Math.max(-1, Math.min(1, s));
+            out[o] = v < 0 ? v * 32768 : v * 32767;
+            pos += ratio;
           }
+          this.pos = pos - inLen;
+          this.prev = ch[inLen - 1];
           this.port.postMessage(out);
           return true;
         }
@@ -251,6 +278,8 @@
       await ac.audioWorklet.addModule(url);
       URL.revokeObjectURL(url);
       workletNode = new AudioWorkletNode(ac, 'downsampler');
+      // 実サンプルレートに応じて 16kHz への比率を通知
+      workletNode.port.postMessage({ type: 'cfg', ratio: (ac.sampleRate || 48000) / 16000 });
       srcNode.connect(workletNode);
 
       workletNode.port.onmessage = (e) => {
@@ -314,9 +343,9 @@
           finalTexts = [];
           interimText = '';
 
-          // 1) Vosk を試す
+          // 1) Vosk を試す（ja-* のときのみ）
           let usedVosk = false;
-          if (await ensureVosk()) {
+          if (langSel.value.toLowerCase().startsWith('ja') && await ensureVosk()) {
             voskCleanup = await startVoskPipeline(stream);
             supportEl.textContent = 'Vosk: running (OSS)';
             usedVosk = true;
