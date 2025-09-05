@@ -179,22 +179,29 @@
       if (VOSK_READY) return true;
 
       const init = async () => {
-        // vosk.js を読み込み（ESM → 失敗時 UMD にフォールバック）
-        let Vosk;
-        try {
-          const mod = await import(VOSK_BASE + 'vosk.js');
-          Vosk = mod?.Vosk || mod?.default || mod;
-        } catch (e) {
-          await new Promise((res, rej) => {
-            const s = document.createElement('script');
-            s.src = VOSK_BASE + 'vosk.js';
-            s.onload = res; s.onerror = rej; document.head.appendChild(s);
-          });
-          Vosk = window.Vosk || window.vosk;
+        // 事前に必須ファイルを確認
+        const missing = await verifyVoskAssets();
+        if (missing.length) {
+          throw new Error('Vosk assets missing: ' + missing.map(u => new URL(u, location.href).pathname).join(', '));
         }
-        if (!Vosk) throw new Error('Vosk not loaded');
+         // vosk.js を読み込み（ESM → 失敗時 UMD にフォールバック）
+         let Vosk;
+         try {
+           const mod = await import(VOSK_BASE + 'vosk.js');
+           Vosk = mod?.Vosk || mod?.default || mod;
+         } catch (e) {
+           await new Promise((res, rej) => {
+             const s = document.createElement('script');
+             s.src = VOSK_BASE + 'vosk.js';
+             s.onload = res; s.onerror = rej; document.head.appendChild(s);
+           });
+           Vosk = window.Vosk || window.vosk;
+         }
+         if (!Vosk) throw new Error('Vosk not loaded');
         Vosk.setWasmPrefix?.(VOSK_BASE);
-        Vosk.setLogLevel?.(-1);
+        // 一部ビルドは initialize が必要（worker.js を明示）
+        try { await Vosk.initialize?.({ wasmPrefix: VOSK_BASE, workerUrl: VOSK_BASE + 'worker.js' }); } catch {}
+         Vosk.setLogLevel?.(-1);
 
         // モデルロード（zip対応/非対応どちらでも動くように分岐）
         if (typeof Vosk.createModel === 'function' && /\.zip$/i.test(VOSK_MODEL)) {
