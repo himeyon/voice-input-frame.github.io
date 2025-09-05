@@ -172,28 +172,26 @@
 
       const init = async () => {
         // vosk.js を読み込み（ESM → 失敗時 UMD）
-         let Vosk;
-         try {
-           const mod = await import(VOSK_BASE + 'vosk.js');
-           Vosk = mod?.Vosk || mod?.default || mod;
-         } catch {
-           await new Promise((res, rej) => {
-             const s = document.createElement('script');
-             s.src = VOSK_BASE + 'vosk.js';
-             s.onload = res; s.onerror = rej; document.head.appendChild(s);
-           });
-           Vosk = window.Vosk || window.vosk;
-         }
-         if (!Vosk) throw new Error('Vosk not loaded');
+        let Vosk;
+        try {
+          const mod = await import(VOSK_BASE + 'vosk.js');
+          Vosk = mod?.Vosk || mod?.default || mod;
+        } catch {
+          await new Promise((res, rej) => {
+            const s = document.createElement('script');
+            s.src = VOSK_BASE + 'vosk.js';
+            s.onload = res; s.onerror = rej; document.head.appendChild(s);
+          });
+          Vosk = window.Vosk || window.vosk;
+        }
+        if (!Vosk) throw new Error('Vosk not loaded');
         Vosk.setLogLevel?.(-1);
-        // 0.0.8はディレクトリを直接読む
-        if (/\.zip$/i.test(VOSK_MODEL)) {
-          throw new Error('vosk-browser@0.0.8 はZIPモデル未対応。解凍してディレクトリを指定してください。');
-        }
+
+        // モデルは解凍済みディレクトリを直接読む（末尾スラッシュ保証）
         if (typeof Vosk.Model !== 'function') {
-          throw new Error('Vosk.Model が見つかりません（0.0.8想定）');
+          throw new Error('Vosk.Model が見つかりません');
         }
-        const dir = VOSK_MODEL.replace(/\/?$/, '/');
+        const dir = VOSK_MODEL.endsWith('/') ? VOSK_MODEL : (VOSK_MODEL + '/');
         voskModel = new Vosk.Model(dir);
 
          // Recognizer（ビルド差吸収）
