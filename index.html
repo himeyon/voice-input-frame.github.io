@@ -37,17 +37,12 @@
 
   <script>
   (function () {
-    // ====== 設定（シンプル）======
-    const BASE_PATH = new URL('.', location.href).href;       // 絶対URLで基底を取得
-    const VOSK_ENABLE = true;                                 // Voskを使わないなら false
-    const VOSK_INIT_TIMEOUT_MS = 30000;                       // 初期化の最大待ち時間
-    // ライブラリはCDN固定（v0.0.8）
-    const VOSK_BASE  = 'https://cdn.jsdelivr.net/npm/vosk-browser@0.0.8/dist/';
-    // モデルはGitHub Pages上のZIP（または解凍ディレクトリ）を指定
-    // 例: ZIP … BASE_PATH + 'static/models/vosk-model-small-ja-0.22.zip'
-    //     DIR … BASE_PATH + 'static/models/vosk-model-small-ja-0.22/'
-    const VOSK_MODEL = BASE_PATH + 'static/models/vosk-model-small-ja-0.22.zip';
-    const VOSK_MODEL_IS_ZIP = /\.zip$/i.test(VOSK_MODEL);
+    // ====== 固定設定（GitHub Pages: https://<ユーザー>.github.io/voice-input-frame/）======
+    const REPO_BASE = location.origin + '/voice-input-frame/';   // 末尾スラッシュ必須（リポジトリ名に合わせる）
+    const VOSK_ENABLE = true;
+    const VOSK_INIT_TIMEOUT_MS = 120000;                         // 50MBモデル想定
+    const VOSK_BASE  = 'https://cdn.jsdelivr.net/npm/vosk-browser@0.0.8/dist/'; // 0.0.8は vosk.js のみ
+    const VOSK_MODEL = REPO_BASE + 'static/models/vosk-model-small-ja-0.22/';   // 解凍済みディレクトリ固定
 
 
     // ====== UI ======
@@ -168,24 +163,7 @@
       } catch { setStatus('全文選択のみ完了（クリップボード不可）'); }
     });
 
-    // Vosk必須ファイル確認（自己ホスト版）
-    async function verifyVoskAssets() {
-      const urls = [ VOSK_BASE + 'vosk.js', VOSK_BASE + 'worker.js', VOSK_BASE + 'vosk.wasm' ];
-      // ZIPか解凍ディレクトリかで確認先を変える
-      if (VOSK_MODEL_IS_ZIP) {
-        urls.push(VOSK_MODEL); // ZIPファイルの存在だけ確認
-      } else {
-        urls.push(VOSK_MODEL.replace(/\/?$/, '/') + 'conf/model.conf');
-      }
-      const missing = [];
-      for (const u of urls) {
-        try {
-          const r = await fetch(u, { method: 'HEAD', cache: 'no-store' });
-          if (!r.ok) missing.push(u);
-        } catch { missing.push(u); }
-      }
-      return missing;
-    }
+    // 0.0.8はチェック不要（vosk.js とモデルディレクトリがあればOK）
 
     // ====== Vosk 初期化 ======
     async function ensureVosk() {
@@ -193,17 +171,12 @@
       if (VOSK_READY) return true;
 
       const init = async () => {
-        // 事前に必須ファイルを確認
-        const missing = await verifyVoskAssets();
-        if (missing.length) {
-          throw new Error('Vosk assets missing: ' + missing.map(u => new URL(u, location.href).pathname).join(', '));
-        }
-         // vosk.js を読み込み（ESM → 失敗時 UMD にフォールバック）
+        // vosk.js を読み込み（ESM → 失敗時 UMD）
          let Vosk;
          try {
            const mod = await import(VOSK_BASE + 'vosk.js');
            Vosk = mod?.Vosk || mod?.default || mod;
-         } catch (e) {
+         } catch {
            await new Promise((res, rej) => {
              const s = document.createElement('script');
              s.src = VOSK_BASE + 'vosk.js';
@@ -212,30 +185,18 @@
            Vosk = window.Vosk || window.vosk;
          }
          if (!Vosk) throw new Error('Vosk not loaded');
-        Vosk.setWasmPrefix?.(VOSK_BASE);
-        // 一部ビルドは initialize が必要（worker.js を明示）
-        try { await Vosk.initialize?.({ wasmPrefix: VOSK_BASE, workerUrl: VOSK_BASE + 'worker.js' }); } catch {}
-         Vosk.setLogLevel?.(-1);
-
-        // モデルロード（ZIP優先／未対応ならディレクトリ）
-        if (VOSK_MODEL_IS_ZIP) {
-          if (typeof Vosk.createModel === 'function') {
-            voskModel = await Vosk.createModel(VOSK_MODEL);
-          } else if (Vosk?.Model?.fromZipUrl) {
-            voskModel = await Vosk.Model.fromZipUrl(VOSK_MODEL);
-          } else {
-            throw new Error('このビルドはZIPモデル未対応です。解凍ディレクトリを指定してください。');
-          }
-        } else {
-          if (typeof Vosk.Model === 'function') {
-            const dir = VOSK_MODEL.replace(/\/?$/, '/');
-            voskModel = new Vosk.Model(dir);
-          } else {
-            throw new Error('Vosk.Model が見つかりません（vosk-browser@0.0.8 を想定）');
-          }
+        Vosk.setLogLevel?.(-1);
+        // 0.0.8はディレクトリを直接読む
+        if (/\.zip$/i.test(VOSK_MODEL)) {
+          throw new Error('vosk-browser@0.0.8 はZIPモデル未対応。解凍してディレクトリを指定してください。');
         }
+        if (typeof Vosk.Model !== 'function') {
+          throw new Error('Vosk.Model が見つかりません（0.0.8想定）');
+        }
+        const dir = VOSK_MODEL.replace(/\/?$/, '/');
+        voskModel = new Vosk.Model(dir);
 
-        // Recognizer（バージョン差吸収）
+         // Recognizer（ビルド差吸収）
         if (voskModel?.Recognizer) {
           voskRecognizer = new voskModel.Recognizer({ sampleRate: 16000 });
         } else if (typeof Vosk.Recognizer === 'function') {
