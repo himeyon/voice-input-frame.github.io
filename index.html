@@ -31,6 +31,8 @@
     .footer { justify-content: space-between; font-size: 12px; opacity: 0.8; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
   </style>
+  <!-- vosk-browser 0.0.8: UMDを先読み（window.Vosk を提供） -->
+  <script src="https://cdn.jsdelivr.net/npm/vosk-browser@0.0.8/dist/vosk.js"></script>
 </head>
 <body>
   <div id="main-box-layout"></div>
@@ -196,20 +198,17 @@
       if (VOSK_READY) return true;
 
       const init = async () => {
-        // vosk.js を読み込み（ESM → 失敗時 UMD）
-        let Vosk;
-        try {
-          const mod = await import(VOSK_BASE + 'vosk.js');
-          Vosk = mod?.Vosk || mod?.default || mod;
-        } catch {
-          await new Promise((res, rej) => {
-            const s = document.createElement('script');
-            s.src = VOSK_BASE + 'vosk.js';
-            s.onload = res; s.onerror = rej; document.head.appendChild(s);
-          });
-          Vosk = window.Vosk || window.vosk;
+        // 0.0.8 は UMDのみ。window.Vosk の Model が使えるまで待機
+        async function waitForModel(ms) {
+          const t0 = performance.now();
+          while (performance.now() - t0 < ms) {
+            const V = window.Vosk || window.vosk;
+            if (V && typeof V.Model === 'function') return V;
+            await new Promise(r => setTimeout(r, 50));
+          }
+          throw new Error('Vosk.Model が見つかりません（読み込み未完了）');
         }
-        if (!Vosk) throw new Error('Vosk not loaded');
+        const Vosk = await waitForModel(10000); // 最大10秒待つ
         Vosk.setLogLevel?.(-1);
 
         // モデルは解凍済みディレクトリを直接読む（末尾スラッシュ保証）
