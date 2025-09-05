@@ -176,6 +176,19 @@
       } catch { setStatus('全文選択のみ完了（クリップボード不可）'); }
     });
 
+    // Vosk必須ファイル（CDN）確認
+    async function verifyVoskAssets() {
+      const urls = ['vosk.js','worker.js','vosk.wasm'].map(f => VOSK_BASE + f);
+      const missing = [];
+      for (const u of urls) {
+        try {
+          const r = await fetch(u, { method: 'HEAD', mode: 'cors', cache: 'no-store' });
+          if (!r.ok) missing.push(u);
+        } catch { missing.push(u); }
+      }
+      return missing;
+    }
+
     // ====== Vosk 初期化 ======
     async function ensureVosk() {
       if (!VOSK_ENABLE) return false;
