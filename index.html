@@ -99,6 +99,16 @@
       }
     })();
 
+    // 追加: 必須ファイルをHEADで一括確認
+    (async () => {
+      const base = new URL('static/models/vosk-model-small-ja-0.22/', REPO_BASE);
+      const files = ['conf/model.conf','am/final.mdl','graph/HCLr.fst','graph/Gr.fst','graph/phones.txt'];
+      const res = await Promise.all(files.map(f => fetch(new URL(f, base), { method: 'HEAD', cache: 'no-store' }).then(r => ({ f, ok: r.ok, s: r.status })).catch(()=>({ f, ok:false, s:'ERR' }))));
+      const ok = res.every(x => x.ok);
+      console.log('[probe all]', res);
+      statusEl.textContent = `[probe all] ${ok ? 'OK' : 'NG'} ${res.map(x => `${x.f}:${x.ok?200:x.s}`).join(', ')}`;
+    })();
+
     // ====== 状態 ======
     let stream = null;
     let recorder = null;
