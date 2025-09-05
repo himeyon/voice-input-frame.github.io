@@ -51,7 +51,8 @@
 
     // /static/... を相対解決
     const VOSK_BASE  = BASE_PATH + 'static/vosk/';                 // ← vosk.js / vosk.wasm / worker.js 等
-    const VOSK_MODEL = BASE_PATH + 'static/models/vosk-model-small-ja-0.22.zip';
+    // 解凍済みディレクトリを指す（末尾スラッシュ推奨）
+    const VOSK_MODEL = BASE_PATH + 'static/models/vosk-model-small-ja-0.22/';
     const VOSK_ENABLE = true;       // 試す時 true、戻す時 false
     const VOSK_INIT_TIMEOUT_MS = 15000;
 
@@ -187,8 +188,20 @@
         Vosk.setWasmPrefix?.(VOSK_BASE);
         Vosk.setLogLevel?.(-1);
 
-        // モデルロード
-        voskModel = await Vosk.createModel(VOSK_MODEL);
+        // モデルロード（zip対応/非対応どちらでも動くように分岐）
+        if (typeof Vosk.createModel === 'function' && /\.zip$/i.test(VOSK_MODEL)) {
+          // zip指定時のみ createModel を使用
+          voskModel = await Vosk.createModel(VOSK_MODEL);
+        } else if (typeof Vosk.Model === 'function') {
+          // 解凍ディレクトリをそのまま指定
+          const dir = VOSK_MODEL.replace(/\/?$/, '/');
+          voskModel = new Vosk.Model(dir);
+        } else if (Vosk?.Model?.fromZipUrl && /\.zip$/i.test(VOSK_MODEL)) {
+          // 一部ビルドの互換API
+          voskModel = await Vosk.Model.fromZipUrl(VOSK_MODEL);
+        } else {
+          throw new Error('No model loader found in vosk.js');
+        }
 
         // Recognizer（バージョン差吸収）
         if (voskModel?.Recognizer) {
@@ -392,6 +405,9 @@
 
       // Vosk経路の後片付け
       if (typeof voskCleanup === 'function') { try { voskCleanup(); } catch(_){} voskCleanup = null; }
+     try { voskRecognizer?.free?.(); } catch(_) {}
+     try { voskModel?.free?.(); } catch(_) {}
+     voskRecognizer = null; voskModel = null; VOSK_READY = false;
 
       // Web Speech経路の後片付け
       if (recognition) { try { recognition.onend = null; recognition.stop(); } catch (e) {} recognition = null; }
