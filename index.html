@@ -44,15 +44,18 @@
     // const VOSK_MODEL  = '/static/models/vosk-model-small-ja-0.22.zip'; // 日本語小型モデル
 
     // HTMLと同じディレクトリを基準にする
-    // 現在ページのディレクトリ（/repo/ など）を安全に取得
     const BASE_PATH = new URL('.', location.href).pathname;
 
     // /static/... を相対解決
-    const VOSK_BASE  = BASE_PATH + 'static/vosk/';                 // ← vosk.js / vosk.wasm / worker.js 等
+    // const VOSK_BASE  = BASE_PATH + 'static/vosk/';                 // ← vosk.js / vosk.wasm / worker.js 等
     // 解凍済みディレクトリを指す（末尾スラッシュ推奨）
-    const VOSK_MODEL = BASE_PATH + 'static/models/vosk-model-small-ja-0.22/';
+    // const VOSK_MODEL = BASE_PATH + 'static/models/vosk-model-small-ja-0.22/';
     const VOSK_ENABLE = true;       // 試す時 true、戻す時 false
-    const VOSK_INIT_TIMEOUT_MS = 15000;
+    const VOSK_INIT_TIMEOUT_MS = 45000;
+    // ライブラリはCDN、モデルはZIPを直指定（createModel を使う）
+    // 代替CDN: https://unpkg.com/vosk-browser@0.0.28/dist/
+    const VOSK_BASE  = 'https://cdn.jsdelivr.net/npm/vosk-browser@0.0.8/dist/';
+    const VOSK_MODEL = 'https://alphacephei.com/vosk/models/vosk-model-small-ja-0.22.zip';
 
 
     // ====== UI ======
