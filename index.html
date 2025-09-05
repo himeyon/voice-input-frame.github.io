@@ -208,26 +208,44 @@
           }
           throw new Error('Vosk.Model が見つかりません（読み込み未完了）');
         }
-        const Vosk = await waitForModel(10000); // 最大10秒待つ
+        const Vosk = await waitForModel(10000);
         Vosk.setLogLevel?.(-1);
 
-        // モデルは解凍済みディレクトリを直接読む（末尾スラッシュ保証）
         if (typeof Vosk.Model !== 'function') {
           throw new Error('Vosk.Model が見つかりません');
         }
         const dir = VOSK_MODEL.endsWith('/') ? VOSK_MODEL : (VOSK_MODEL + '/');
         voskModel = new Vosk.Model(dir);
 
-         // Recognizer（ビルド差吸収）
-        if (voskModel?.Recognizer) {
-          voskRecognizer = new voskModel.Recognizer({ sampleRate: 16000 });
-        } else if (typeof Vosk.Recognizer === 'function') {
-          voskRecognizer = new Vosk.Recognizer({ model: voskModel, sampleRate: 16000 });
-        } else if (typeof voskModel?.createRecognizer === 'function') {
-          voskRecognizer = await voskModel.createRecognizer({ sampleRate: 16000 });
-        } else {
+        // --- 互換: Recognizer をあらゆる経路で生成 ---
+        async function createRecognizerCompat(Vosk, model) {
+          // 1) new model.Recognizer({ sampleRate })
+          if (model && typeof model.Recognizer === 'function') {
+            return new model.Recognizer({ sampleRate: 16000 });
+          }
+          // 2) new Vosk.Recognizer({ model, sampleRate })
+          if (typeof Vosk.Recognizer === 'function') {
+            try { return new Vosk.Recognizer({ model, sampleRate: 16000 }); } catch {}
+            try { return new Vosk.Recognizer(model, 16000); } catch {}
+          }
+          // 3) new Vosk.KaldiRecognizer(model, 16000)
+          if (typeof Vosk.KaldiRecognizer === 'function') {
+            try { return new Vosk.KaldiRecognizer(model, 16000); } catch {}
+          }
+          // 4) model.createRecognizer(...)
+          if (typeof model?.createRecognizer === 'function') {
+            try { return await model.createRecognizer({ sampleRate: 16000 }); } catch {}
+            try { return await model.createRecognizer(16000); } catch {}
+          }
+          // 5) Vosk.createRecognizer(...)
+          if (typeof Vosk.createRecognizer === 'function') {
+            try { return await Vosk.createRecognizer({ model, sampleRate: 16000 }); } catch {}
+            try { return await Vosk.createRecognizer(model, 16000); } catch {}
+          }
           throw new Error('Recognizer constructor not found');
         }
+        voskRecognizer = await createRecognizerCompat(Vosk, voskModel);
+        console.info('[vosk] recognizer ready via', (voskRecognizer?.constructor?.name || 'unknown'));
 
         VOSK_READY = true;
         supportEl.textContent = 'Vosk: ready (OSS)';
