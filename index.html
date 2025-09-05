@@ -84,6 +84,20 @@
     const supportEl = document.getElementById('support');
     const transcriptEl = document.getElementById('transcript');
 
+    // 固定パス1本読み（static/models 配下の存在確認）
+    const MODEL_PROBE_URL = REPO_BASE + 'static/models/vosk-model-small-ja-0.22/conf/model.conf';
+    (async () => {
+      try {
+        const r = await fetch(MODEL_PROBE_URL, { cache: 'no-store' });
+        const msg = r.ok ? 'OK' : ('NG ' + r.status);
+        statusEl.textContent = `[probe] ${MODEL_PROBE_URL} → ${msg}`;
+        console.log('[probe]', MODEL_PROBE_URL, r.status);
+      } catch (e) {
+        statusEl.textContent = `[probe] ${MODEL_PROBE_URL} → NG`;
+        console.warn('[probe] failed', e);
+      }
+    })();
+
     // ====== 状態 ======
     let stream = null;
     let recorder = null;
