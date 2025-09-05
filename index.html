@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8" />
-  <title>マイク → 文字起こし (Vosk優先)</title>
+  <title>マイク → 文字起こし (Web Speech)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="color-scheme" content="light dark" />
   <style>
@@ -31,52 +31,39 @@
     .footer { justify-content: space-between; font-size: 12px; opacity: 0.8; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
   </style>
-  <!-- vosk-browser 0.0.8: UMDを先読み（window.Vosk を提供） -->
-  <script src="https://cdn.jsdelivr.net/npm/vosk-browser@0.0.8/dist/vosk.js"></script>
 </head>
 <body>
-  <div id="main-box-layout"></div>
+  <div class="wrap">
+    <h1>音声入力→テキスト</h1>
+    <div class="panel">
+      <div class="bar">
+        <label class="pill">マイク <select id="mic"></select></label>
+        <label class="pill">言語
+          <select id="lang">
+            <option value="ja-JP" selected>ja-JP</option>
+            <option value="en-US">en-US</option>
+          </select>
+        </label>
+        <span id="support"></span>
+      </div>
+      <div class="row">
+        <button id="start" class="primary">録音開始</button>
+        <button id="stop" disabled>停止</button>
+        <button id="saveText" disabled>テキスト保存</button>
+        <span id="status"></span>
+      </div>
+    </div>
+    <div class="panel">
+      <textarea id="transcript" class="mono" aria-live="polite" placeholder="ここに文字起こし結果が表示されます"></textarea>
+    </div>
+    <div class="row footer">
+      <div>Web Speech API 非対応ブラウザでは動作しません。</div>
+      <div>Copyright(C) COMTURE CORPORATION. All rights reserved.</div>
+    </div>
+  </div>
 
   <script>
   (function () {
-    // ====== 固定設定（GitHub Pages: https://<ユーザー>.github.io/voice-input-frame/）======
-    // このHTMLのディレクトリを基準にする（常に末尾スラッシュ）
-    const REPO_BASE = new URL('./', location.href).href;
-    const VOSK_ENABLE = true;
-    const VOSK_INIT_TIMEOUT_MS = 120000;                         // 50MBモデル想定
-    const VOSK_BASE  = 'https://cdn.jsdelivr.net/npm/vosk-browser@0.0.8/dist/'; // 0.0.8は vosk.js のみ
-    const VOSK_MODEL = new URL('static/models/vosk-model-small-ja-0.22/', REPO_BASE).href; // 解凍済みディレクトリ
-
-
-    // ====== UI ======
-    const root = document.getElementById('main-box-layout');
-    if (!root) { document.body.innerHTML = '<p>#main-box-layout が見つかりません。</p>'; return; }
-
-    root.innerHTML =
-      '<div class="wrap">' +
-      '  <h1>音声入力→テキスト</h1>' +
-      '  <div class="panel">' +
-      '    <div class="bar">' +
-      '      <label class="pill">マイク <select id="mic"></select></label>' +
-      '      <label class="pill">言語 ' +
-      '        <select id="lang"><option value="ja-JP" selected>ja-JP</option><option value="en-US">en-US</option></select>' +
-      '      </label>' +
-      '      <span id="support"></span>' +
-      '    </div>' +
-      '    <div class="row">' +
-      '      <button id="start" class="primary">録音開始</button>' +
-      '      <button id="stop" disabled>停止</button>' +
-      '      <button id="saveText" disabled>テキスト保存</button>' +
-      '      <span id="status"></span>' +
-      '    </div>' +
-      '  </div>' +
-      '  <div class="panel"><textarea id="transcript" class="mono" aria-live="polite" placeholder="ここに文字起こし結果が表示されます"></textarea></div>' +
-      '  <div class="row footer">' +
-      '    <div>Web Speech API 非対応ブラウザでは動作しません。</div>' +
-      '    <div>Copyright(C) COMTURE CORPORATION. All rights reserved.</div>' +
-      '  </div>' +
-      '</div>';
-
     // ====== 要素 ======
     const micSel = document.getElementById('mic');
     const langSel = document.getElementById('lang');
@@ -87,49 +74,20 @@
     const supportEl = document.getElementById('support');
     const transcriptEl = document.getElementById('transcript');
 
-    // 固定パス1本読み（static/models 配下の存在確認）
-    const MODEL_PROBE_URL = new URL('static/models/vosk-model-small-ja-0.22/conf/model.conf', REPO_BASE).href;
-    (async () => {
-      try {
-        const r = await fetch(MODEL_PROBE_URL, { cache: 'no-store' });
-        const msg = r.ok ? 'OK' : ('NG ' + r.status);
-        statusEl.textContent = `[probe] ${MODEL_PROBE_URL} → ${msg}`;
-        console.log('[probe]', MODEL_PROBE_URL, r.status);
-      } catch (e) {
-        statusEl.textContent = `[probe] ${MODEL_PROBE_URL} → NG`;
-        console.warn('[probe] failed', e);
-      }
-    })();
-
-    // 追加: 必須ファイルをHEADで一括確認
-    (async () => {
-      const base = new URL('static/models/vosk-model-small-ja-0.22/', REPO_BASE);
-      const files = ['conf/model.conf','am/final.mdl','graph/HCLr.fst','graph/Gr.fst','graph/phones.txt'];
-      const res = await Promise.all(files.map(f => fetch(new URL(f, base), { method: 'HEAD', cache: 'no-store' }).then(r => ({ f, ok: r.ok, s: r.status })).catch(()=>({ f, ok:false, s:'ERR' }))));
-      const ok = res.every(x => x.ok);
-      console.log('[probe all]', res);
-      statusEl.textContent = `[probe all] ${ok ? 'OK' : 'NG'} ${res.map(x => `${x.f}:${x.ok?200:x.s}`).join(', ')}`;
-    })();
-
     // ====== 状態 ======
     let stream = null;
     let recorder = null;
     let chunks = [];
-    let recognition = null;           // Web Speech Fallback
+    let recognition = null;
     let finalTexts = [];
     let interimText = '';
     let running = false;
-
-    // Vosk状態
-    let VOSK_READY = false, voskModel = null, voskRecognizer = null;
-    let ac = null, srcNode = null, workletNode = null; // AudioWorklet
-    let voskCleanup = null;
 
     // ====== Web Speech ======
     const SR  = window.SpeechRecognition || window.webkitSpeechRecognition;
     const SGL = window.SpeechGrammarList || window.webkitSpeechGrammarList;
 
-    // ====== 語彙ヒント（任意）======
+    // 語彙ヒント（任意）
     const boostWords = []; // 例: ['稟議','伝票','勘定科目','仕訳','与信']
     const applyGrammars = (rec) => {
       if (!SGL || !boostWords.length) return;
@@ -137,6 +95,21 @@
       const grammar = '#JSGF V1.0; grammar words; public <word> = ' + boostWords.map(w => w.replace(/;/g,'')).join(' | ') + ' ;';
       list.addFromString(grammar, 0.4);
       rec.grammars = list;
+    };
+
+    // ====== util ======
+    const setStatus = (msg) => { statusEl.textContent = msg; };
+    const renderText = () => {
+      const joined = finalTexts.join(' ');
+      transcriptEl.value = joined + (interimText ? (' ' + interimText) : '');
+      transcriptEl.scrollTop = transcriptEl.scrollHeight;
+    };
+    const lockDuringRecording = (on) => {
+      startBtn.disabled = on;
+      stopBtn.disabled = !on;
+      saveBtn.disabled = false; // 表示中テキストはいつでも保存可
+      micSel.disabled = on;
+      langSel.disabled = on;
     };
 
     // ====== マイク一覧 ======
@@ -164,21 +137,6 @@
         .catch(() => fill(''));
     })();
 
-    // ====== util ======
-    const setStatus = (msg) => { statusEl.textContent = msg; };
-    const renderText = () => {
-      const joined = finalTexts.join(' ');
-      transcriptEl.value = joined + (interimText ? (' ' + interimText) : '');
-      transcriptEl.scrollTop = transcriptEl.scrollHeight;
-    };
-    const lockDuringRecording = (on) => {
-      startBtn.disabled = on;
-      stopBtn.disabled = !on;
-      saveBtn.disabled = false; // 表示中テキストはいつでも保存可
-      micSel.disabled = on;
-      langSel.disabled = on;
-    };
-
     // クリックで全文コピー
     transcriptEl.addEventListener('pointerdown', async () => {
       const text = transcriptEl.value || '';
@@ -190,170 +148,7 @@
       } catch { setStatus('全文選択のみ完了（クリップボード不可）'); }
     });
 
-    // 0.0.8はチェック不要（vosk.js とモデルディレクトリがあればOK）
-
-    // ====== Vosk 初期化 ======
-    async function ensureVosk() {
-      if (!VOSK_ENABLE) return false;
-      if (VOSK_READY) return true;
-
-      const init = async () => {
-        // UMD読み込み済みが前提
-        const Vosk = await (async () => {
-          const t0 = performance.now();
-          while (performance.now() - t0 < 5000) {
-            const V = window.Vosk || window.vosk;
-            if (V) return V;
-            await new Promise(r => setTimeout(r, 50));
-          }
-          throw new Error('Vosk not loaded');
-        })();
-        Vosk.setLogLevel?.(-1);
-
-        // モデル（解凍済みディレクトリ）
-        const dir = VOSK_MODEL.endsWith('/') ? VOSK_MODEL : (VOSK_MODEL + '/');
-        if (typeof Vosk.Model !== 'function') {
-          console.info('[vosk] global keys:', Object.keys(Vosk||{}));
-          throw new Error('Vosk.Model が見つかりません');
-        }
-        voskModel = new Vosk.Model(dir);
-
-        // Recognizer 生成（確実な3パターンのみ）
-        let rec = null;
-        if (typeof Vosk.KaldiRecognizer === 'function') {
-          try { rec = new Vosk.KaldiRecognizer(voskModel, 16000); } catch {}
-        }
-        if (!rec && typeof Vosk.Recognizer === 'function') {
-          try { rec = new Vosk.Recognizer({ model: voskModel, sampleRate: 16000 }); } catch {}
-          if (!rec) try { rec = new Vosk.Recognizer(voskModel, 16000); } catch {}
-        }
-        if (!rec && typeof voskModel?.createRecognizer === 'function') {
-          try { rec = await voskModel.createRecognizer({ sampleRate: 16000 }); } catch {}
-        }
-        if (!rec) {
-          console.info('[vosk] Vosk keys:', Object.keys(Vosk||{}));
-          console.info('[vosk] Model keys:', Object.keys(voskModel||{}));
-          throw new Error('Recognizer constructor not found');
-        }
-        voskRecognizer = rec;
-
-        VOSK_READY = true;
-        supportEl.textContent = 'Vosk: ready (OSS)';
-        return true;
-      };
-
-      setStatus('Vosk 読み込み中…');
-      try {
-        return await Promise.race([
-          init(),
-          new Promise((_, rej) => setTimeout(() => rej(new Error('vosk-timeout')), VOSK_INIT_TIMEOUT_MS))
-        ]);
-      } catch (e) {
-        console.warn('[vosk:init failed]', e);
-        supportEl.textContent = SR ? 'SpeechRecognition: available (fallback)' : 'SpeechRecognition: not available';
-        setStatus('Vosk初期化失敗: ' + (e?.message || e) + '（Web Speechに切替）');
-        return false;
-      }
-    }
-
-    // ページアイドル時にVoskを先読み（初回体験の改善）
-    if ('requestIdleCallback' in window) {
-      window.requestIdleCallback(() => { ensureVosk().catch(()=>{}); }, { timeout: 500 });
-    } else {
-      window.setTimeout(() => { ensureVosk().catch(()=>{}); }, 500);
-    }
-
-    // ====== 48kHz→16kHz ダウンサンプル(AudioWorklet) ======
-    const WORKLET_CODE = `
-      class DownsamplerProcessor extends AudioWorkletProcessor {
-        constructor() {
-          super();
-          this.ratio = 3;     // inRate / 16000
-          this.pos = 0;       // 入力バッファ位置の小数累積
-          this.prev = 0;      // 前バッファの末尾サンプル
-          this.port.onmessage = (e) => {
-            if (e.data && e.data.type === 'cfg' && e.data.ratio) this.ratio = e.data.ratio;
-          };
-        }
-        process(inputs) {
-          const input = inputs[0];
-          if (!input || input.length === 0) return true;
-          const ch = input[0];
-          if (!ch || ch.length === 0) return true;
-          const inLen = ch.length;
-          const ratio = this.ratio;
-          const outLen = Math.floor((inLen + this.pos) / ratio);
-          if (outLen <= 0) { this.pos += inLen; return true; }
-          const out = new Int16Array(outLen);
-          let pos = this.pos;
-          for (let o = 0; o < outLen; o++) {
-            const idx = Math.floor(pos);
-            const frac = pos - idx;
-            const s0 = (idx === 0) ? this.prev : ch[idx - 1];
-            const s1 = ch[idx];
-            const s  = s0 + (s1 - s0) * frac;  // 線形補間
-            const v  = Math.max(-1, Math.min(1, s));
-            out[o] = v < 0 ? v * 32768 : v * 32767;
-            pos += ratio;
-          }
-          this.pos = pos - inLen;
-          this.prev = ch[inLen - 1];
-          this.port.postMessage(out);
-          return true;
-        }
-      }
-      registerProcessor('downsampler', DownsamplerProcessor);
-    `;
-
-    async function startVoskPipeline(stream) {
-      const AC = window.AudioContext || window.webkitAudioContext;
-      ac = new AC({ sampleRate: 48000 });
-      srcNode = ac.createMediaStreamSource(stream);
-      const blob = new Blob([WORKLET_CODE], { type: 'application/javascript' });
-      const url  = URL.createObjectURL(blob);
-      await ac.audioWorklet.addModule(url);
-      URL.revokeObjectURL(url);
-      workletNode = new AudioWorkletNode(ac, 'downsampler');
-      // 実サンプルレートに応じて 16kHz への比率を通知
-      workletNode.port.postMessage({ type: 'cfg', ratio: (ac.sampleRate || 48000) / 16000 });
-      srcNode.connect(workletNode);
-
-      workletNode.port.onmessage = (e) => {
-        if (!VOSK_READY || !voskRecognizer) return;
-        const pcm16 = e.data;
-        try {
-          const ok = voskRecognizer.acceptWaveform(pcm16);
-          if (ok) {
-            const res = voskRecognizer.result();
-            const txt = (res && res.text) ? res.text.trim() : '';
-            if (txt) {
-              finalTexts.push(txt.endsWith('。') ? txt : (txt + '。'));
-              interimText = '';
-              renderText();
-            }
-          } else {
-            const pr = voskRecognizer.partialResult();
-            interimText = (pr && pr.partial) ? pr.partial : '';
-            renderText();
-          }
-        } catch (err) {
-          console.warn('[vosk:accept]', err);
-        }
-      };
-
-      await ac.resume();
-
-      // 後片付け関数を返す
-      return function cleanup() {
-        try { if (workletNode) workletNode.port.onmessage = null; } catch(_){}
-        try { if (srcNode) srcNode.disconnect(); } catch(_){}
-        try { if (workletNode) workletNode.disconnect(); } catch(_){}
-        try { if (ac && ac.state !== 'closed' && ac.close) ac.close(); } catch(_){}
-        workletNode = null; srcNode = null; ac = null;
-      };
-    }
-
-    // ====== 録音開始 ======
+    // ====== 録音開始（Web Speechのみ）======
     startBtn.addEventListener('click', () => {
       const deviceId = micSel.value || undefined;
       const audioConstraints = deviceId ? { deviceId } : {};
@@ -369,7 +164,7 @@
         .then(async (s) => {
           stream = s;
 
-          // 保存用（元のまま）
+          // 保存用（任意。停止時にサイズだけ表示）
           const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
           recorder = new MediaRecorder(stream, { mimeType: mime });
           chunks = [];
@@ -379,38 +174,32 @@
           finalTexts = [];
           interimText = '';
 
-          // 1) Vosk を試す（ja-* のときのみ）
-          let usedVosk = false;
-          if (langSel.value.toLowerCase().startsWith('ja') && await ensureVosk()) {
-            voskCleanup = await startVoskPipeline(stream);
-            supportEl.textContent = 'Vosk: running (OSS)';
-            usedVosk = true;
-          } else {
-            supportEl.textContent = SR ? 'SpeechRecognition: available (fallback)' : 'SpeechRecognition: not available';
+          // Web Speech
+          supportEl.textContent = SR ? 'SpeechRecognition: available (Web Speech)' : 'SpeechRecognition: not available';
+          if (!SR) {
+            setStatus('このブラウザはWeb Speech APIに対応していません。');
+            return;
           }
 
-          // 2) 失敗/未使用なら Web Speech
-          if (!usedVosk && SR) {
-            recognition = new SR();
-            recognition.lang = langSel.value;
-            recognition.continuous = true;
-            recognition.interimResults = true;
-            recognition.maxAlternatives = 1;
-            applyGrammars(recognition);
+          recognition = new SR();
+          recognition.lang = langSel.value;
+          recognition.continuous = true;
+          recognition.interimResults = true;
+          recognition.maxAlternatives = 1;
+          applyGrammars(recognition);
 
-            recognition.onresult = (ev) => {
-              interimText = '';
-              for (let i = ev.resultIndex; i < ev.results.length; i++) {
-                const r = ev.results[i];
-                if (r.isFinal) finalTexts.push(r[0].transcript.trim());
-                else interimText += r[0].transcript;
-              }
-              renderText();
-            };
-            recognition.onerror = (e) => { console.warn('[sr:error]', e?.error || e?.name || e); };
-            recognition.onend = () => { if (running) { try { recognition.start(); } catch(_){} } };
-            try { recognition.start(); } catch (_) {}
-          }
+          recognition.onresult = (ev) => {
+            interimText = '';
+            for (let i = ev.resultIndex; i < ev.results.length; i++) {
+              const r = ev.results[i];
+              if (r.isFinal) finalTexts.push(r[0].transcript.trim());
+              else interimText += r[0].transcript;
+            }
+            renderText();
+          };
+          recognition.onerror = (e) => { console.warn('[sr:error]', e?.error || e?.name || e); };
+          recognition.onend = () => { if (running) { try { recognition.start(); } catch(_){} } };
+          try { recognition.start(); } catch (_) {}
 
           running = true;
           lockDuringRecording(true);
@@ -426,16 +215,10 @@
     stopBtn.addEventListener('click', () => {
       running = false;
 
-      // Vosk経路の後片付け
-      if (typeof voskCleanup === 'function') { try { voskCleanup(); } catch(_){} voskCleanup = null; }
-     try { voskRecognizer?.free?.(); } catch(_) {}
-     try { voskModel?.free?.(); } catch(_) {}
-     voskRecognizer = null; voskModel = null; VOSK_READY = false;
-
-      // Web Speech経路の後片付け
+      // Web Speech停止
       if (recognition) { try { recognition.onend = null; recognition.stop(); } catch (e) {} recognition = null; }
 
-      // 録音停止（保存用）
+      // 録音停止（保存用サイズ表示のみ）
       new Promise((resolve) => {
         if (!recorder) { resolve(new Blob([], { type: 'audio/webm' })); return; }
         recorder.addEventListener('stop', () => {
