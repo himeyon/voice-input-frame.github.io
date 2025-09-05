@@ -37,25 +37,17 @@
 
   <script>
   (function () {
-    // ====== 設定（自己ホスト前提）======
-    // const VOSK_ENABLE = true; // ← Voskを使わない運用に戻すときは false
-    // const VOSK_INIT_TIMEOUT_MS = 4000; // Vosk初期化に時間がかかったら諦めてWSRへ
-    // const VOSK_BASE   = '/static/vosk/';   // vosk.js / vosk.wasm / worker.js 等を置いた場所
-    // const VOSK_MODEL  = '/static/models/vosk-model-small-ja-0.22.zip'; // 日本語小型モデル
-
-    // HTMLと同じディレクトリを基準にする
-    const BASE_PATH = new URL('.', location.href).pathname;
-
-    // /static/... を相対解決
-    // const VOSK_BASE  = BASE_PATH + 'static/vosk/';                 // ← vosk.js / vosk.wasm / worker.js 等
-    // 解凍済みディレクトリを指す（末尾スラッシュ推奨）
-    // const VOSK_MODEL = BASE_PATH + 'static/models/vosk-model-small-ja-0.22/';
-    const VOSK_ENABLE = true;       // 試す時 true、戻す時 false
-    const VOSK_INIT_TIMEOUT_MS = 45000;
-    // ライブラリはCDN、モデルはZIPを直指定（createModel を使う）
-    // 代替CDN: https://unpkg.com/vosk-browser@0.0.28/dist/
+    // ====== 設定（シンプル）======
+    const BASE_PATH = new URL('.', location.href).href;       // 絶対URLで基底を取得
+    const VOSK_ENABLE = true;                                 // Voskを使わないなら false
+    const VOSK_INIT_TIMEOUT_MS = 30000;                       // 初期化の最大待ち時間
+    // ライブラリはCDN固定（v0.0.8）
     const VOSK_BASE  = 'https://cdn.jsdelivr.net/npm/vosk-browser@0.0.8/dist/';
-    const VOSK_MODEL = 'https://alphacephei.com/vosk/models/vosk-model-small-ja-0.22.zip';
+    // モデルはGitHub Pages上のZIP（または解凍ディレクトリ）を指定
+    // 例: ZIP … BASE_PATH + 'static/models/vosk-model-small-ja-0.22.zip'
+    //     DIR … BASE_PATH + 'static/models/vosk-model-small-ja-0.22/'
+    const VOSK_MODEL = BASE_PATH + 'static/models/vosk-model-small-ja-0.22.zip';
+    const VOSK_MODEL_IS_ZIP = /\.zip$/i.test(VOSK_MODEL);
 
 
     // ====== UI ======
@@ -176,13 +168,19 @@
       } catch { setStatus('全文選択のみ完了（クリップボード不可）'); }
     });
 
-    // Vosk必須ファイル（CDN）確認
+    // Vosk必須ファイル確認（自己ホスト版）
     async function verifyVoskAssets() {
-      const urls = ['vosk.js','worker.js','vosk.wasm'].map(f => VOSK_BASE + f);
+      const urls = [ VOSK_BASE + 'vosk.js', VOSK_BASE + 'worker.js', VOSK_BASE + 'vosk.wasm' ];
+      // ZIPか解凍ディレクトリかで確認先を変える
+      if (VOSK_MODEL_IS_ZIP) {
+        urls.push(VOSK_MODEL); // ZIPファイルの存在だけ確認
+      } else {
+        urls.push(VOSK_MODEL.replace(/\/?$/, '/') + 'conf/model.conf');
+      }
       const missing = [];
       for (const u of urls) {
         try {
-          const r = await fetch(u, { method: 'HEAD', mode: 'cors', cache: 'no-store' });
+          const r = await fetch(u, { method: 'HEAD', cache: 'no-store' });
           if (!r.ok) missing.push(u);
         } catch { missing.push(u); }
       }
@@ -219,19 +217,22 @@
         try { await Vosk.initialize?.({ wasmPrefix: VOSK_BASE, workerUrl: VOSK_BASE + 'worker.js' }); } catch {}
          Vosk.setLogLevel?.(-1);
 
-        // モデルロード（zip対応/非対応どちらでも動くように分岐）
-        if (typeof Vosk.createModel === 'function' && /\.zip$/i.test(VOSK_MODEL)) {
-          // zip指定時のみ createModel を使用
-          voskModel = await Vosk.createModel(VOSK_MODEL);
-        } else if (typeof Vosk.Model === 'function') {
-          // 解凍ディレクトリをそのまま指定
-          const dir = VOSK_MODEL.replace(/\/?$/, '/');
-          voskModel = new Vosk.Model(dir);
-        } else if (Vosk?.Model?.fromZipUrl && /\.zip$/i.test(VOSK_MODEL)) {
-          // 一部ビルドの互換API
-          voskModel = await Vosk.Model.fromZipUrl(VOSK_MODEL);
+        // モデルロード（ZIP優先／未対応ならディレクトリ）
+        if (VOSK_MODEL_IS_ZIP) {
+          if (typeof Vosk.createModel === 'function') {
+            voskModel = await Vosk.createModel(VOSK_MODEL);
+          } else if (Vosk?.Model?.fromZipUrl) {
+            voskModel = await Vosk.Model.fromZipUrl(VOSK_MODEL);
+          } else {
+            throw new Error('このビルドはZIPモデル未対応です。解凍ディレクトリを指定してください。');
+          }
         } else {
-          throw new Error('No model loader found in vosk.js');
+          if (typeof Vosk.Model === 'function') {
+            const dir = VOSK_MODEL.replace(/\/?$/, '/');
+            voskModel = new Vosk.Model(dir);
+          } else {
+            throw new Error('Vosk.Model が見つかりません（vosk-browser@0.0.8 を想定）');
+          }
         }
 
         // Recognizer（バージョン差吸収）
@@ -259,7 +260,7 @@
       } catch (e) {
         console.warn('[vosk:init failed]', e);
         supportEl.textContent = SR ? 'SpeechRecognition: available (fallback)' : 'SpeechRecognition: not available';
-        setStatus('Vosk使えないためWeb Speechに切替');
+        setStatus('Vosk初期化失敗: ' + (e?.message || e) + '（Web Speechに切替）');
         return false;
       }
     }
